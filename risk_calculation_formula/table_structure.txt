@@ -1,0 +1,43 @@
+sp_ss_uq_peccancy_list_log表的字段:
+- id
+- is_deducting
+- peccancy_type
+- supervision_ocode
+- peccancy_code
+- training
+- peccancy_create_time
+- province_code
+- receive_peccancy_time
+- data_from
+- identity_card
+- peccancy_time
+- audit_time
+- update_time
+- supervision_oname
+- optimistic_lock_version
+- peccancy_list_id
+- peccancy_uid
+- input_source
+- peccancy_update_time
+- record_date
+- create_time
+- record_code
+- peccancy_push_time
+- major_wide
+- bureau_code
+- peccancy_behavior
+- updator_id
+- peccancy_id
+- score_value
+- creator_id
+- peccancy_uname
+- creator_name
+- supervision_oid
+- is_self_exposure
+
+前5行数据:
+{'id': '001E6092B49F4008912369EDC77BE1A8', 'is_deducting': '1', 'peccancy_type': '3', 'supervision_ocode': '010901', 'peccancy_code': 'C47', 'training': '1', 'peccancy_create_time': datetime.datetime(2025, 9, 24, 15, 27, 18), 'province_code': '01', 'receive_peccancy_time': datetime.datetime(2025, 9, 26, 17, 32, 43), 'data_from': '0', 'identity_card': '53232219810106051X', 'peccancy_time': datetime.datetime(2025, 9, 24, 0, 0), 'audit_time': datetime.datetime(2025, 9, 26, 17, 32, 41), 'update_time': datetime.datetime(2025, 9, 26, 17, 32, 44), 'supervision_oname': '中国南方电网有限责任公司/超高压输电公司/超高压输电公司昆明局/生产技术部', 'optimistic_lock_version': '1', 'peccancy_list_id': 'FF4A6A8F58E34777A9E67F0DE23AE419', 'peccancy_uid': '邢开金', 'input_source': '1', 'peccancy_update_time': datetime.datetime(2025, 9, 26, 17, 32, 41), 'record_date': datetime.datetime(2025, 9, 24, 15, 25, 53), 'create_time': datetime.datetime(2025, 9, 26, 17, 32, 44), 'record_code': 'WZ-010109250924-000012', 'peccancy_push_time': datetime.datetime(2025, 9, 26, 17, 32, 41), 'major_wide': '1', 'bureau_code': '0109', 'peccancy_behavior': '有人站立梯子上作业时移动梯子，站立在梯子限高档位以上作业或两人同时站立在同一梯子上作业', 'updator_id': None, 'peccancy_id': '58F4363B2273437FBCCDFB0357A22EB0', 'score_value': '3.00', 'creator_id': '00032476_cgy', 'peccancy_uname': '邢开金', 'creator_name': None, 'supervision_oid': '24207', 'is_self_exposure': '2'}
+{'id': '002B0908553E4F2C9D1657F035B79E60', 'is_deducting': '2', 'peccancy_type': '4', 'supervision_ocode': '01080802', 'peccancy_code': 'D10', 'training': '1', 'peccancy_create_time': datetime.datetime(2026, 1, 8, 8, 39, 30), 'province_code': '01', 'receive_peccancy_time': datetime.datetime(2026, 1, 8, 8, 49, 55), 'data_from': '0', 'identity_card': '22080219890406065X', 'peccancy_time': datetime.datetime(2026, 1, 2, 0, 0), 'audit_time': datetime.datetime(2026, 1, 8, 8, 49, 54), 'update_time': datetime.datetime(2026, 1, 8, 8, 49, 55), 'supervision_oname': '中国南方电网有限责任公司/超高压输电公司/超高压输电公司曲靖局/变电管理所/罗平变电站', 'optimistic_lock_version': '1', 'peccancy_list_id': 'A9ACE614783E466BA7B8C6B6AE173DB0', 'peccancy_uid': '110F4942CB2B522AE05336050A0A2485', 'input_source': '1', 'peccancy_update_time': datetime.datetime(2026, 1, 8, 8, 49, 54), 'record_date': datetime.datetime(2026, 1, 3, 16, 45, 10), 'create_time': datetime.datetime(2026, 1, 8, 8, 49, 55), 'record_code': 'WZ-010108260103-000004', 'peccancy_push_time': datetime.datetime(2026, 1, 8, 8, 49, 54), 'major_wide': '1', 'bureau_code': '0108', 'peccancy_behavior': '信息系统的作业信息填报不正确、不规范', 'updator_id': None, 'peccancy_id': '3E8175916BD14AB5A8FEBF3980687BA4', 'score_value': '0.00', 'creator_id': '110F4942CD46522AE05336050A0A2485', 'peccancy_uname': '赵纪宇', 'creator_name': None, 'supervision_oid': '25870', 'is_self_exposure': '1'}
+{'id': '004338C149EA406CAA20E09658EEB7DC', 'is_deducting': '2', 'peccancy_type': '1', 'supervision_ocode': '01070109', 'peccancy_code': 'D10', 'training': '1', 'peccancy_create_time': datetime.datetime(2025, 12, 10, 5, 52, 53), 'province_code': '01', 'receive_peccancy_time': datetime.datetime(2025, 12, 12, 17, 19, 13), 'data_from': '0', 'identity_card': '522321199804211210', 'peccancy_time': datetime.datetime(2025, 12, 10, 5, 47, 7), 'audit_time': datetime.datetime(2025, 12, 12, 17, 19, 10), 'update_time': datetime.datetime(2025, 12, 12, 17, 19, 13), 'supervision_oname': '中国南方电网有限责任公司/超高压输电公司/超高压输电公司天生桥局/变电管理所/500kV鲁西背靠背换流站', 'optimistic_lock_version': '1', 'peccancy_list_id': 'CB05A4D486264491B9D0E05B7AC5FE76', 'peccancy_uid': 'DBEDF6805EC54AAFBB7E9E93873D75AD', 'input_source': '1', 'peccancy_update_time': datetime.datetime(2025, 12, 12, 17, 19, 11), 'record_date': datetime.datetime(2025, 12, 10, 5, 43, 40), 'create_time': datetime.datetime(2025, 12, 12, 17, 19, 13), 'record_code': 'WZ-010107251210-000001', 'peccancy_push_time': datetime.datetime(2025, 12, 12, 17, 19, 11), 'major_wide': '1', 'bureau_code': '0107', 'peccancy_behavior': '信息系统的作业信息填报不正确、不规范', 'updator_id': None, 'peccancy_id': 'FCCACD760CFB4018BC4152B4F0CB7AD2', 'score_value': '0.00', 'creator_id': '00031787_cgy', 'peccancy_uname': '梁永坤', 'creator_name': None, 'supervision_oid': '8af935015286212f0153356d4a1119fb', 'is_self_exposure': '1'}
+{'id': '004A2A59889649BC85971809FE7CDF9A', 'is_deducting': '1', 'peccancy_type': '3', 'supervision_ocode': '010404', 'peccancy_code': 'C53', 'training': '1', 'peccancy_create_time': datetime.datetime(2026, 3, 30, 15, 52, 12), 'province_code': '01', 'receive_peccancy_time': datetime.datetime(2026, 3, 30, 15, 52, 15), 'data_from': '0', 'identity_card': '370203200102285917', 'peccancy_time': datetime.datetime(2026, 3, 7, 0, 0), 'audit_time': datetime.datetime(2026, 3, 30, 15, 52, 14), 'update_time': datetime.datetime(2026, 3, 30, 15, 52, 15), 'supervision_oname': '中国南方电网有限责任公司/超高压输电公司/超高压输电公司柳州局/安全监管部', 'optimistic_lock_version': '1', 'peccancy_list_id': 'EEDFDFEA4AEB49EBBC61FE408DE98924', 'peccancy_uid': '姜昱志', 'input_source': '1', 'peccancy_update_time': datetime.datetime(2026, 3, 30, 15, 52, 14), 'record_date': datetime.datetime(2026, 3, 12, 0, 27, 53), 'create_time': datetime.datetime(2026, 3, 30, 15, 52, 15), 'record_code': 'WZ-010104260312-000001', 'peccancy_push_time': datetime.datetime(2026, 3, 30, 15, 52, 14), 'major_wide': '1', 'bureau_code': '0104', 'peccancy_behavior': '现场使用的验电器、安全帽、安全带、脚扣、登高脚踏板、接地线、绝缘杆、绝缘手套、绝缘鞋、绝缘靴、绝缘绳、绝缘挡板、绝缘梯等工器具未定期试验、无试验合格标示或试验过期，不按规定存放工器具或不按时入库，超标准配置随车工器具', 'updator_id': None, 'peccancy_id': '07969C2946584D95BD9A424A43CC2698', 'score_value': '3.00', 'creator_id': '00032045_cgy', 'peccancy_uname': '姜昱志', 'creator_name': None, 'supervision_oid': '24044', 'is_self_exposure': '2'}
+{'id': '004BFB46373643519B29EAFDF4196028', 'is_deducting': None, 'peccancy_type': '1', 'supervision_ocode': '012022', 'peccancy_code': 'D06', 'training': '1', 'peccancy_create_time': datetime.datetime(2025, 5, 22, 11, 53, 24), 'province_code': '01', 'receive_peccancy_time': datetime.datetime(2025, 5, 23, 11, 38), 'data_from': '0', 'identity_card': '530103198607140371', 'peccancy_time': datetime.datetime(2025, 5, 22, 11, 53, 4), 'audit_time': datetime.datetime(2025, 5, 23, 11, 37, 59), 'update_time': datetime.datetime(2025, 5, 23, 11, 38), 'supervision_oname': '中国南方电网有限责任公司/超高压输电公司/超高压输电公司电力科研院/监测分析部', 'optimistic_lock_version': '1', 'peccancy_list_id': 'D98F919DCB6840078E8093EE5E266703', 'peccancy_uid': 'A6FE43FBF45645A8B99FBD8DFDC37A25', 'input_source': '1', 'peccancy_update_time': datetime.datetime(2025, 5, 23, 11, 37, 59), 'record_date': datetime.datetime(2025, 5, 22, 11, 48, 35), 'create_time': datetime.datetime(2025, 5, 23, 11, 38), 'record_code': 'WZ-010108250522-000013', 'peccancy_push_time': datetime.datetime(2025, 5, 23, 11, 37, 59), 'major_wide': '2', 'bureau_code': '0108', 'peccancy_behavior': '现场勘察及安全技术交底记录、风险评估记录、施工作业表单、二次措施单等现场作业文件和表单、记录填写不规范', 'updator_id': None, 'peccancy_id': 'F4D16F164BBA473298C493C80B99F9C9', 'score_value': '0.00', 'creator_id': '00030351_cgy', 'peccancy_uname': '任珂民', 'creator_name': None, 'supervision_oid': '8adc552b8fde37ed01903383ad117605', 'is_self_exposure': '2'}

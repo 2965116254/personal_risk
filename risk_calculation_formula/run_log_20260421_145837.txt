@@ -1,0 +1,47 @@
+STDOUT:
+开始执行风险评估...
+获取数据库配置...
+数据库配置: {'host': '192.168.176.229', 'port': 23306, 'user': 'root', 'password': 'hyetec@2025_personal_risk', 'database': 'hvdc_risk_db'}
+测试模式: True, 限制记录数: 10
+违章登记年份: 2025
+执行风险评估...
+数据库连接成功
+执行查询操作票表...
+找到 10 张操作票
+共收集 19 个人员ID
+执行查询违章记录...
+找到 13 条违章记录
+开始计算风险值...
+操作票 0000607993FD4ED2BDAB37E90086D9AA 风险评估完成，总风险值: 0
+操作票 00009D0AAEFD4D27835AF61FC016FE5B 风险评估完成，总风险值: 6
+操作票 0000BC2CB77648D4889DD9FB13C21D71 风险评估完成，总风险值: 3
+操作票 0000E5DCBDEB491C9BC3913AC479C383 风险评估完成，总风险值: 3
+操作票 0000E6B0F00E431DBD3FF7625F0A8744 风险评估完成，总风险值: 3
+操作票 0001258CE00F477DA0B00D8EAEDAD170 风险评估完成，总风险值: 3
+操作票 00017F2270BE47129027685F3698DAF2 风险评估完成，总风险值: 3
+操作票 000183EE33E64AAF9C571CED0BBD5FA9 风险评估完成，总风险值: 0
+操作票 000204D18AE04ADFAC19B633C1C93B7D 风险评估完成，总风险值: 2
+操作票 00020AFFD7364561ADFCE373ED003C2C 风险评估完成，总风险值: 0
+数据库游标已关闭
+数据库连接已关闭
+共评估 10 张操作票
+操作票 0000607993FD4ED2BDAB37E90086D9AA: 总风险值=0
+操作票 00009D0AAEFD4D27835AF61FC016FE5B: 总风险值=6
+操作票 0000BC2CB77648D4889DD9FB13C21D71: 总风险值=3
+操作票 0000E5DCBDEB491C9BC3913AC479C383: 总风险值=3
+操作票 0000E6B0F00E431DBD3FF7625F0A8744: 总风险值=3
+操作票 0001258CE00F477DA0B00D8EAEDAD170: 总风险值=3
+操作票 00017F2270BE47129027685F3698DAF2: 总风险值=3
+操作票 000183EE33E64AAF9C571CED0BBD5FA9: 总风险值=0
+操作票 000204D18AE04ADFAC19B633C1C93B7D: 总风险值=2
+操作票 00020AFFD7364561ADFCE373ED003C2C: 总风险值=0
+保存结果到Excel文件...
+创建目录: d:\hyetec\safety\personal_risk_prevention_algo\risk_calculation_formula\output
+数据已保存到: d:\hyetec\safety\personal_risk_prevention_algo\risk_calculation_formula\output\风险评估结果_20260421_145849.xlsx
+共保存了 10 条记录
+Excel文件保存成功: d:\hyetec\safety\personal_risk_prevention_algo\risk_calculation_formula\output\风险评估结果_20260421_145849.xlsx
+风险评估完成。
+
+STDERR:
+
+Return code: 0

@@ -1,0 +1,51 @@
+# ==================== 数据库配置 ====================
+database:
+  host: "192.168.176.229"
+  port: 23306
+  user: "root"
+  password: "hyetec@2025_personal_risk"
+  database: "personal_risk_db"
+
+database_new:
+  host: "192.168.176.229"
+  port: 23306
+  user: "root"
+  password: "hyetec@2025_personal_risk"
+  database: "hvdc_risk_db"
+
+# ==================== MinIO 配置 ====================
+minio:
+  endpoint: "192.168.176.229:29000"                # MinIO 服务地址（不含协议）
+  access_key: "admin"
+  secret_key: "admin123456"
+  bucket_name: "personal-risk"
+  object_prefix: "risk"                     # 存储对象前缀
+  secure: false                            # true 使用 https，false 使用 http
+
+# ==================== 定时任务配置 ====================
+# 支持两种模式：
+# 1. interval: 间隔秒数，例如 3600 表示每小时执行一次
+# 2. cron: cron 表达式，例如 "0 2 * * *" 表示每天凌晨2点执行
+schedule:
+  # 选择一种，注释掉另一种
+#  interval: 3600  # 单位：秒
+  cron: "00 9 * * *"
+
+# ==================== 运行模式 ====================
+test_mode: false
+query_limit: 10            # test_mode=true 时生效
+
+# ==================== 年度参数 ====================
+current_year: 2025
+
+# ==================== 输出目录（容器内临时目录） ====================
+output_dir: "/tmp/excel_output"
+
+# ==================== D 类评分所需 CSV 文件路径（容器内路径） ====================
+d_score_csv: "D_score.csv"
+fault_scene_csv: "fault_scene.csv"
+
+# ==================== MCP 服务配置 ====================
+mcp:
+  host: "0.0.0.0"
+  port: 8755

@@ -1,0 +1,397 @@
+'''
+按工作负责人及违章类别统计次数
+'''
+SELECT 
+    w.work_principal_uid,
+    LEFT(p.peccancy_code, 1) AS first_letter,          -- 违章代码首字母
+    COUNT(*) AS peccancy_count
+FROM sp_pd_wticket_base w
+INNER JOIN sp_ss_uq_peccancy_list_log p 
+    ON w.work_principal_uid = p.work_principal_uid    -- 请根据实际外键字段名调整
+WHERE YEAR(p.record_date) = 2025                       -- 2025年违章记录
+  AND w.work_principal_uid IS NOT NULL                 -- 排除空负责人
+GROUP BY w.work_principal_uid, first_letter
+ORDER BY w.work_principal_uid, peccancy_count DESC;
+
+查询详细违章记录（含首字母分类）
+
+SELECT 
+    w.work_principal_uid,
+    p.record_date,
+    p.peccancy_code,
+    LEFT(p.peccancy_code, 1) AS peccancy_category,    -- 首字母代表类别
+    p.*                                              -- 如需其他字段可替换
+FROM sp_pd_wticket_base w
+INNER JOIN sp_ss_uq_peccancy_list_log p 
+    ON w.work_principal_uid = p.work_principal_uid
+WHERE YEAR(p.record_date) = 2025
+  AND w.work_principal_uid IS NOT NULL
+ORDER BY w.work_principal_uid, p.record_date;
+
+按工作班人员及违章首字母统计次数
+
+WITH RECURSIVE split_members AS (
+    SELECT 
+        id AS ticket_id,
+        SUBSTRING_INDEX(work_member_uid, ',', 1) AS member_uid,
+        SUBSTRING(work_member_uid, LENGTH(SUBSTRING_INDEX(work_member_uid, ',', 1)) + 2) AS remaining
+    FROM sp_pd_wticket_base
+    WHERE work_member_uid IS NOT NULL AND work_member_uid != ''
+    UNION ALL
+    SELECT 
+        ticket_id,
+        SUBSTRING_INDEX(remaining, ',', 1),
+        SUBSTRING(remaining, LENGTH(SUBSTRING_INDEX(remaining, ',', 1)) + 2)
+    FROM split_members
+    WHERE remaining != ''
+)
+SELECT 
+    sm.member_uid,
+    LEFT(p.peccancy_code, 1) AS first_letter,
+    COUNT(*) AS peccancy_count
+FROM split_members sm
+INNER JOIN sp_ss_uq_peccancy_list_log p ON sm.member_uid = p.user_uid   -- 请替换实际字段名
+WHERE YEAR(p.record_date) = 2025
+GROUP BY sm.member_uid, first_letter
+ORDER BY sm.member_uid, peccancy_count DESC;
+
+ 列出详细违章记录（含首字母类别）
+
+ WITH RECURSIVE split_members AS (
+    SELECT 
+        id AS ticket_id,
+        SUBSTRING_INDEX(work_member_uid, ',', 1) AS member_uid,
+        SUBSTRING(work_member_uid, LENGTH(SUBSTRING_INDEX(work_member_uid, ',', 1)) + 2) AS remaining
+    FROM sp_pd_wticket_base
+    WHERE work_member_uid IS NOT NULL AND work_member_uid != ''
+    UNION ALL
+    SELECT 
+        ticket_id,
+        SUBSTRING_INDEX(remaining, ',', 1),
+        SUBSTRING(remaining, LENGTH(SUBSTRING_INDEX(remaining, ',', 1)) + 2)
+    FROM split_members
+    WHERE remaining != ''
+)
+SELECT 
+    sm.member_uid,
+    p.record_date,
+    p.peccancy_code,
+    LEFT(p.peccancy_code, 1) AS peccancy_category,
+    p.*   -- 如需其他字段可替换
+FROM split_members sm
+INNER JOIN sp_ss_uq_peccancy_list_log p ON sm.member_uid = p.user_uid
+WHERE YEAR(p.record_date) = 2025
+ORDER BY sm.member_uid, p.record_date;
+
+按监护人及违章首字母统计违章次数
+
+WITH RECURSIVE split_guardians AS (
+    SELECT 
+        id AS ticket_id,
+        SUBSTRING_INDEX(guardian_uid, ',', 1) AS guardian_id,
+        SUBSTRING(guardian_uid, LENGTH(SUBSTRING_INDEX(guardian_uid, ',', 1)) + 2) AS remaining
+    FROM sp_pd_wticket_base
+    WHERE guardian_uid IS NOT NULL AND guardian_uid != ''
+    UNION ALL
+    SELECT 
+        ticket_id,
+        SUBSTRING_INDEX(remaining, ',', 1),
+        SUBSTRING(remaining, LENGTH(SUBSTRING_INDEX(remaining, ',', 1)) + 2)
+    FROM split_guardians
+    WHERE remaining != ''
+)
+SELECT 
+    sg.guardian_id,
+    LEFT(p.peccancy_code, 1) AS first_letter,
+    COUNT(*) AS peccancy_count
+FROM split_guardians sg
+INNER JOIN sp_ss_uq_peccancy_list_log p ON sg.guardian_id = p.user_uid   -- 请替换实际关联字段
+WHERE YEAR(p.record_date) = 2025
+GROUP BY sg.guardian_id, first_letter
+ORDER BY sg.guardian_id, peccancy_count DESC;
+
+查询详细违章记录（含首字母类别）
+
+WITH RECURSIVE split_guardians AS (
+    SELECT 
+        id AS ticket_id,
+        SUBSTRING_INDEX(guardian_uid, ',', 1) AS guardian_id,
+        SUBSTRING(guardian_uid, LENGTH(SUBSTRING_INDEX(guardian_uid, ',', 1)) + 2) AS remaining
+    FROM sp_pd_wticket_base
+    WHERE guardian_uid IS NOT NULL AND guardian_uid != ''
+    UNION ALL
+    SELECT 
+        ticket_id,
+        SUBSTRING_INDEX(remaining, ',', 1),
+        SUBSTRING(remaining, LENGTH(SUBSTRING_INDEX(remaining, ',', 1)) + 2)
+    FROM split_guardians
+    WHERE remaining != ''
+)
+SELECT 
+    sg.guardian_id,
+    p.record_date,
+    p.peccancy_code,
+    LEFT(p.peccancy_code, 1) AS peccancy_category,
+    p.*   -- 如需其他字段可替换
+FROM split_guardians sg
+INNER JOIN sp_ss_uq_peccancy_list_log p ON sg.guardian_id = p.user_uid
+WHERE YEAR(p.record_date) = 2025
+ORDER BY sg.guardian_id, p.record_date;
+
+全部工作票的作业总人数（简单求和）
+
+SELECT 
+    SUM(CAST(work_member_count AS SIGNED)) AS total_worker_count
+FROM sp_pd_wticket_base
+WHERE work_member_count IS NOT NULL 
+  AND work_member_count REGEXP '^[0-9]+$';   -- 过滤非数字脏数据
+
+  按年度/月度统计作业总人数（示例：2025年）
+
+  SELECT 
+    YEAR(create_time) AS year,
+    MONTH(create_time) AS month,
+    SUM(CAST(work_member_count AS SIGNED)) AS total_worker_count
+FROM sp_pd_wticket_base
+WHERE create_time >= '2025-01-01' AND create_time < '2026-01-01'
+  AND work_member_count IS NOT NULL
+GROUP BY YEAR(create_time), MONTH(create_time)
+ORDER BY year, month;
+
+‘’‘
+负责人的人员性质，查询作业计划表sp_ss_rc_work_plan，获取作业主体task_main，作业计划编号work_code，查询sp_ss_uq_operator_archive，获取单位属性
+unit_attribute，对比作业主体和单位属性，如果一致则输出人员性质，不一致则提醒用户人员性质不一致
+’‘’
+
+SELECT 
+    wp.work_code AS 作业计划编号,
+    wp.task_main AS 作业主体,
+    wp.work_master_uname AS 工作负责人,
+    oa.unit_attribute AS 单位属性,
+    CASE 
+        WHEN oa.user_uid IS NULL THEN '无法对比：未找到该负责人的档案记录'
+        WHEN CAST(wp.task_main AS UNSIGNED) = 1 AND CAST(oa.unit_attribute AS UNSIGNED) = 1 
+            THEN '一致：本单位-系统内人员'
+        WHEN CAST(wp.task_main AS UNSIGNED) = 2 AND CAST(oa.unit_attribute AS UNSIGNED) IN (2, 21) 
+            THEN '一致：外单位-系统外人员'
+        WHEN wp.task_main IS NULL OR oa.unit_attribute IS NULL 
+            THEN '无法对比（缺少作业主体或人员档案）'
+        ELSE '不一致：人员性质与作业主体不匹配'
+    END AS 对比结果
+FROM 
+    sp_ss_rc_work_plan wp
+LEFT JOIN 
+    sp_ss_uq_operator_archive oa 
+    ON wp.work_master_uid = oa.user_uid
+    -- 如果仍需过滤启用状态，取消下一行注释
+    -- AND oa.archive_state = '1'
+WHERE 
+    wp.work_master_uid IS NOT NULL;
+
+'''
+工作负责人(含小组工作负责人)组织同类型作业次数，查询操作票表sp_pd_wticket_base，确认负责人，查询作业计划表sp_ss_rc_work_plan，获取作业类型task_type
+，再查负责人在查询作业计划表sp_ss_rc_work_plan中的所有符合那条工作计划的作业类型次数
+'''
+
+WITH task_stats AS (
+    SELECT
+        work_master_uid AS leader_uid,
+        work_master_uname AS leader_name,
+        task_type,
+        COUNT(1) AS total_count,
+        -- 统计1年内、2年内次数（需要时间字段 create_time）
+        SUM(CASE WHEN create_time >= DATE_SUB(CURDATE(), INTERVAL 1 YEAR) THEN 1 ELSE 0 END) AS cnt_last_1year,
+        SUM(CASE WHEN create_time >= DATE_SUB(CURDATE(), INTERVAL 2 YEAR) THEN 1 ELSE 0 END) AS cnt_last_2year
+    FROM sp_ss_rc_work_plan
+    WHERE work_master_uid IS NOT NULL
+      AND task_type IS NOT NULL
+    GROUP BY work_master_uid, work_master_uname, task_type
+)
+
+SELECT
+    leader_uid,
+    leader_name,
+    task_type,
+    -- 作业类型名称
+    CASE ROUND(task_type, 0)
+        WHEN 1 THEN '预试'
+        WHEN 2 THEN '定检'
+        WHEN 3 THEN '巡视'
+        WHEN 4 THEN '检修'
+        WHEN 5 THEN '维护'
+        WHEN 6 THEN '消缺'
+        WHEN 7 THEN '操作'
+        WHEN 8 THEN '验收'
+        WHEN 9 THEN '安装、更换作业'
+        WHEN 10 THEN '测量'
+        WHEN 11 THEN '带电'
+        WHEN 12 THEN '工器具试验'
+        WHEN 13 THEN '配合(生产)'
+        WHEN 14 THEN '其他(生产)'
+        WHEN 15 THEN '反措'
+        ELSE '未知类型'
+    END AS task_type_name,
+    total_count AS same_type_work_count,
+    -- 风险值计算（优先判断0分）
+    CASE
+        WHEN cnt_last_1year >= 2 OR cnt_last_2year >= 5 THEN 0
+        WHEN total_count = 1 THEN 6
+        WHEN total_count < 3 THEN 5          -- 即 total_count = 2
+        WHEN total_count BETWEEN 3 AND 4 THEN 3
+        WHEN total_count >= 5 THEN 2
+        ELSE NULL
+    END AS risk_score
+FROM task_stats
+ORDER BY leader_uid, task_type;
+
+
+主要工作班成员(辅助工除外)参与同类型作业次数，查询操作票表sp_pd_wticket_base，确认工作班成员，查询作业计划表sp_ss_rc_work_plan，获取作业类型task_type
+，以这两个为条件，再找同类型的作业
+基础统计（不考虑辅助工过滤）
+
+WITH RECURSIVE split_members AS (
+    SELECT 
+        id,
+        SUBSTRING_INDEX(work_member_uid, ',', 1) AS member_uid,
+        SUBSTRING(work_member_uid, LENGTH(SUBSTRING_INDEX(work_member_uid, ',', 1)) + 2) AS remaining
+    FROM sp_pd_wticket_base
+    WHERE work_member_uid IS NOT NULL AND work_member_uid != ''
+    UNION ALL
+    SELECT 
+        id,
+        SUBSTRING_INDEX(remaining, ',', 1),
+        SUBSTRING(remaining, LENGTH(SUBSTRING_INDEX(remaining, ',', 1)) + 2)
+    FROM split_members
+    WHERE remaining != ''
+)
+SELECT 
+    sm.member_uid,
+    p.task_type,
+    COUNT(*) AS same_type_count
+FROM split_members sm
+INNER JOIN sp_ss_rc_work_plan p ON sm.member_uid = p.work_master_uid
+WHERE p.task_type IS NOT NULL
+GROUP BY sm.member_uid, p.task_type
+ORDER BY sm.member_uid, same_type_count DESC;
+
+WITH RECURSIVE split_members AS (
+    SELECT 
+        id,
+        SUBSTRING_INDEX(work_member_uid, ',', 1) AS member_uid,
+        SUBSTRING(work_member_uid, LENGTH(SUBSTRING_INDEX(work_member_uid, ',', 1)) + 2) AS remaining
+    FROM sp_pd_wticket_base
+    WHERE work_member_uid IS NOT NULL AND work_member_uid != ''
+    UNION ALL
+    SELECT 
+        id,
+        SUBSTRING_INDEX(remaining, ',', 1),
+        SUBSTRING(remaining, LENGTH(SUBSTRING_INDEX(remaining, ',', 1)) + 2)
+    FROM split_members
+    WHERE remaining != ''
+)
+SELECT 
+    sm.member_uid,
+    p.task_type,
+    COUNT(*) AS same_type_count
+FROM split_members sm
+INNER JOIN sp_ss_rc_work_plan p ON sm.member_uid = p.work_master_uid
+WHERE p.task_type IS NOT NULL
+GROUP BY sm.member_uid, p.task_type
+ORDER BY sm.member_uid, same_type_count DESC;
+
+‘’‘
+监护人(含专职监护人)参与同类型作业次数，查询操作票表sp_pd_wticket_base，确认监护人，查询作业计划表sp_ss_rc_work_plan，获取作业类型task_type
+，以这两个为条件，再找同类型的作业
+’‘’
+
+WITH guardian_task_stats AS (
+    SELECT
+        w.guardian_uid,
+        w.guardian_uname,
+        p.task_type,
+        COUNT(1) AS total_count,
+        SUM(CASE WHEN p.create_time >= DATE_SUB(CURDATE(), INTERVAL 1 YEAR) THEN 1 ELSE 0 END) AS cnt_last_1year,
+        SUM(CASE WHEN p.create_time >= DATE_SUB(CURDATE(), INTERVAL 2 YEAR) THEN 1 ELSE 0 END) AS cnt_last_2year
+    FROM sp_pd_wticket_base w
+    JOIN sp_ss_rc_work_plan p ON w.ticket_source_id = p.id   -- 请确认关联字段
+    WHERE w.guardian_uid IS NOT NULL
+      AND w.guardian_uid != ''
+      AND p.task_type IS NOT NULL
+    GROUP BY w.guardian_uid, w.guardian_uname, p.task_type
+)
+
+SELECT
+    guardian_uid,
+    guardian_uname,
+    task_type,
+    CASE ROUND(task_type, 0)
+        WHEN 1 THEN '预试'
+        WHEN 2 THEN '定检'
+        WHEN 3 THEN '巡视'
+        WHEN 4 THEN '检修'
+        WHEN 5 THEN '维护'
+        WHEN 6 THEN '消缺'
+        WHEN 7 THEN '操作'
+        WHEN 8 THEN '验收'
+        WHEN 9 THEN '安装、更换作业'
+        WHEN 10 THEN '测量'
+        WHEN 11 THEN '带电'
+        WHEN 12 THEN '工器具试验'
+        WHEN 13 THEN '配合(生产)'
+        WHEN 14 THEN '其他(生产)'
+        WHEN 15 THEN '反措'
+        ELSE '未知类型'
+    END AS task_type_name,
+    total_count AS same_type_work_count,
+    CASE
+        WHEN cnt_last_1year >= 2 OR cnt_last_2year >= 5 THEN 0
+        WHEN total_count = 1 THEN 6
+        WHEN total_count < 3 THEN 5
+        WHEN total_count BETWEEN 3 AND 4 THEN 3
+        WHEN total_count >= 5 THEN 2
+        ELSE NULL
+    END AS risk_score
+FROM guardian_task_stats
+ORDER BY guardian_uid, task_type;
+
+作业地段、类型，查询操作票表sp_pd_wticket_base，获取主键ID（id），查询作业计划表sp_ss_rc_work_plan，获取工作地点work_place、专业二级分类major_sub_type
+、工作内容work_content，这个需要根据工作内容的描述来判断地段和类型
+SQL 语句（示例）
+
+SELECT 
+    w.id AS ticket_id,
+    p.work_place,
+    p.major_sub_type,
+    p.work_content,
+    -- 根据工作内容判断地段（示例规则）
+    CASE 
+        WHEN p.work_content LIKE '%城区%' OR p.work_content LIKE '%市中心%' THEN '城区'
+        WHEN p.work_content LIKE '%郊区%' OR p.work_content LIKE '%农村%' THEN '郊区'
+        WHEN p.work_content LIKE '%山区%' THEN '山区'
+        ELSE '其他地段'
+    END AS work_section,
+    -- 根据工作内容判断作业类型（示例规则）
+    CASE 
+        WHEN p.work_content LIKE '%抢修%' OR p.work_content LIKE '%故障%' THEN '抢修作业'
+        WHEN p.work_content LIKE '%检修%' OR p.work_content LIKE '%维护%' THEN '检修作业'
+        WHEN p.work_content LIKE '%巡视%' THEN '巡视作业'
+        WHEN p.work_content LIKE '%带电作业%' THEN '带电作业'
+        ELSE '常规作业'
+    END AS work_type
+FROM sp_pd_wticket_base w
+LEFT JOIN sp_ss_rc_work_plan p ON w.ticket_source_id = p.id   -- 请根据实际外键修改
+WHERE w.id = :ticket_id   -- 可选：指定工作票ID，不指定则查询所有
+ORDER BY w.create_time DESC;
+‘’‘
+计划性质，需要通过主键关联id，查询作业计划表sp_ss_rc_work_plan，获取计划类型(1 计划 2 临时)plan_type来判断是计划性工作还是临时性工作，获取发布时间release_time来判断
+是前一天的临时工作还是当日临时工作--参考sql
+’‘’
+SELECT
+    id,
+    plan_type,
+    CASE CAST(plan_type AS SIGNED)
+        WHEN 1 THEN '计划性工作'
+        WHEN 2 THEN '临时性工作'
+        ELSE '未知'
+    END AS work_nature
+FROM sp_ss_rc_work_plan;

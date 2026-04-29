@@ -1,0 +1,10 @@
+docker run --name personal_risk --restart=always --privileged=true
+-v /export/servers/tianbingsheng/mysql_personal_risk/mysql/data:/var/lib/mysql
+-v /export/servers/tianbingsheng/mysql_personal_risk/mysql/conf.d:/etc/mysql/conf.d
+-v /etc/localtime:/etc/localtime:ro
+-e MYSQL_ROOT_PASSWORD=hyetec@2025_personal_risk
+-p 23306:3306 -d mysql:8.4.2
+
+# ---------------------------------------------------------------------
+
+myslql_password=hyetec@2025_personal_risk

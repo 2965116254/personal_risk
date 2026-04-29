@@ -1,0 +1,52 @@
+# 编译产物
+*.o
+*.exe
+*.dll
+*.class
+*.jar
+/build/
+/dist/
+/out/
+/target/
+
+# 日志文件
+*.log
+logs/
+*.tmp
+
+# IDE 配置
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# 操作系统文件
+.DS_Store
+Thumbs.db
+
+# 环境变量/敏感文件
+#.env
+config/secrets.yml
+
+# Node.js
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Python
+__pycache__/
+*.pyc
+venv/
+.env
+
+# Java
+*.war
+*.ear
+
+# JetBrains
+.idea/
+*.iml
+*.iws
+*.ipr
+out/

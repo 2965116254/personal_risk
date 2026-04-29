@@ -1,0 +1,23 @@
+STDOUT:
+开始执行风险评估...
+获取数据库配置...
+数据库配置: {'host': '192.168.176.229', 'port': 23306, 'user': 'root', 'password': 'hyetec@2025_personal_risk', 'database': 'hvdc_risk_db'}
+测试模式: True, 限制记录数: 10
+违章登记年份: 2025
+执行风险评估...
+数据库连接成功
+执行查询操作票表...
+找到 10 张操作票
+共收集 19 个人员ID
+执行查询违章记录...
+找到 13 条违章记录
+开始计算风险值...
+数据库错误: '>=' not supported between instances of 'str' and 'int'
+数据库游标已关闭
+数据库连接已关闭
+没有获取到数据
+风险评估完成。
+
+STDERR:
+
+Return code: 0

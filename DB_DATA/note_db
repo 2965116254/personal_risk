@@ -1,0 +1,9 @@
+操作票、工作票、动火工作票、工作票-工作应采取的安全措施，目前就这四张，抽取了2022-01-01~2021-02-01 一个月数据
+
+操作票表:sp_pd_oticket
+工作票表:sp_pd_wticket_base
+动火工作票表:sp_pd_wticket_fire
+工作票-工作应采取的安全措施表:sp_pd_wticket_saftymeasures
+
+数据库名称：work_operation_ticket_plan
+数据库连接：192.168.176.229 、23306、 root、  hyetec@2025_personal_risk

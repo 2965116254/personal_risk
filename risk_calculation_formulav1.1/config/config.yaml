@@ -1,0 +1,68 @@
+# ==================== 数据库配置 ====================
+database_new:
+  host: "192.168.176.229"
+  port: 23306
+  user: "root"
+  password: "hyetec@2025_personal_risk"
+  database: "hvdc_risk_db"
+
+# ==================== MinIO 配置 ====================
+minio:
+  endpoint: "192.168.176.229:29000"
+  access_key: "admin"
+  secret_key: "admin123456"
+  bucket_name: "personal-risk"
+  object_prefix: "risk"
+  secure: false          # true 使用 https，false 使用 http
+
+# ==================== 定时任务配置 ====================
+schedule:
+  # 执行时间配置（24小时制）
+  times: 
+    - hour: 9
+      minute: 00
+    - hour: 18
+      minute: 00
+  # 或者使用cron表达式（二选一）
+  # cron: "0 9,18 * * *"  # 每天9:00和18:00执行
+
+# ==================== 运行模式 ====================
+test_mode: false            # 测试模式，默认为 false、True 
+query_limit: 100            # test_mode=true 时生效
+
+# ==================== 查询时间范围配置 ====================
+query_time_range:
+  mode: "3month"               # 时间范围模式: fixed(固定日期) | 1month(一个月) | 3month(三个月) | 6month(半年) | 1year(一年) | custom(自定义)
+  start_date: ""               # 开始日期（仅mode=fixed或mode=custom时生效）
+  end_date: ""                 # 结束日期（仅mode=fixed或mode=custom时生效）
+
+# ==================== 人员过滤配置 ====================
+filter:
+  default_filter_words:        # 默认过滤词，用于过滤特定人员
+    - "吊车"
+    - "厂家"
+    - "公司"
+    - "单位"
+    - "司机"
+    - "指挥"
+
+# ==================== elink配置 ====================
+elink:
+  enabled: True
+  base_url: "http://10.120.182.54:9090"
+  send_message_path: "/api/report/sendMessage"
+  send_file_path: "/api/report/sendFile"
+  touser_id: "cgyszajgcs"            # elink接收方ID
+  type: 2                            # 1发个人，2发群组
+  timeout_seconds: 30
+
+# ==================== API 服务配置 ====================
+api_server:
+  host: "0.0.0.0"                    # 绑定地址，0.0.0.0 表示监听所有接口
+  port: 8080                         # 服务端口
+  reload: true                       # 是否自动重载（开发模式）
+
+# ==================== MCP 服务配置 ====================
+mcp_server:
+  host: "0.0.0.0"                    # 绑定地址
+  port: 8765                         # MCP服务端口
