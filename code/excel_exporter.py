@@ -57,6 +57,17 @@ class ExcelExporter:
         filename = f'数智问安-风险评估审核-{timestamp}.xlsx'
         filepath = os.path.join(self.output_dir, filename)
 
+        # 预处理：在内存中过滤无违章数据，避免逐行 delete_rows（大数据量时极慢）
+        filtered_results = []
+        for result in results:
+            detailed = result.get('详细评估结果', [])
+            has_red = any(
+                d.get('风险值得分', 0) > d.get('客户填入分值', 0)
+                for d in detailed
+            )
+            if has_red:
+                filtered_results.append(result)
+
         wb = Workbook()
         ws = wb.active
         ws.title = '风险评估结果'
@@ -65,28 +76,36 @@ class ExcelExporter:
         for col, header in enumerate(self.HEADERS, 1):
             ws.cell(row=1, column=col, value=header)
 
-        # 写入数据
-        for row_num, result in enumerate(results, 2):
+        # 写入数据（已过滤，无需后续删除操作）
+        for row_num, result in enumerate(filtered_results, 2):
             self._write_row(ws, row_num, result)
 
-        # 删除无违章代码的行（从下往上删除，避免行号偏移）
-        for row_num in range(ws.max_row, 1, -1):
-            if ws.cell(row=row_num, column=10).value == '-':
-                ws.delete_rows(row_num)
-
-        # 美化（在保存前执行，保留富文本格式）
-        self._beautify(ws)
+        # 美化（合并遍历，含列宽采样优化）
+        self._beautify(ws, len(filtered_results))
 
         # 保存
         wb.save(filepath)
 
         print(f'数据已保存到: {filepath}')
-        print(f'共保存了 {ws.max_row - 1} 条工作计划编号的评估结果（已过滤无违章数据）')
+        print(f'共保存了 {len(filtered_results)} 条工作计划编号的评估结果（已过滤无违章数据）')
         return filepath
 
     def _write_row(self, ws, row_num: int, result: Dict):
         """写入单行数据"""
         detailed = result.get('详细评估结果', [])
+
+        # 构建评估因子查找表（避免每次 _get_detail_score/_get_detail_customer 都线性遍历）
+        detail_map = {}
+        for d in detailed:
+            detail_map[d.get('评估因子', '')] = d
+
+        def _ds(factor: str) -> float:
+            d = detail_map.get(factor)
+            return float(d.get('风险值得分', 0)) if d else 0.0
+
+        def _dc(factor: str) -> float:
+            d = detail_map.get(factor)
+            return float(d.get('客户填入分值', 0)) if d else 0.0
 
         # 1. 作业计划编号
         ws.cell(row=row_num, column=1, value=result.get('作业计划编号', ''))
@@ -104,14 +123,14 @@ class ExcelExporter:
 
         # 4. 作业人员能力风险值 (B)
         b_score = result.get('B（作业人员能力风险值）', 0)
-        pg_model = self._get_detail_score(detailed, '现场作业负责人（含小组工作负责人）及监护人（含专职监护人）安全意识')
-        pg_customer = self._get_detail_customer(detailed, '现场作业负责人（含小组工作负责人）及监护人（含专职监护人）安全意识')
-        mb_model = self._get_detail_score(detailed, '主要工作班成员(辅助工除外)安全意识')
-        mb_customer = self._get_detail_customer(detailed, '主要工作班成员(辅助工除外)安全意识')
-        cnt_model = self._get_detail_score(detailed, '作业总人数')
-        cnt_customer = self._get_detail_customer(detailed, '作业总人数')
-        nat_model = self._get_detail_score(detailed, '负责人的人员性质')
-        nat_customer = self._get_detail_customer(detailed, '负责人的人员性质')
+        pg_model = _ds('现场作业负责人（含小组工作负责人）及监护人（含专职监护人）安全意识')
+        pg_customer = _dc('现场作业负责人（含小组工作负责人）及监护人（含专职监护人）安全意识')
+        mb_model = _ds('主要工作班成员(辅助工除外)安全意识')
+        mb_customer = _dc('主要工作班成员(辅助工除外)安全意识')
+        cnt_model = _ds('作业总人数')
+        cnt_customer = _dc('作业总人数')
+        nat_model = _ds('负责人的人员性质')
+        nat_customer = _dc('负责人的人员性质')
 
         customer_b = int(pg_customer) + int(mb_customer) + int(cnt_customer) + int(nat_customer)
         b_segments = [
@@ -121,18 +140,18 @@ class ExcelExporter:
             (f"作业总人数: 【模型评估】{cnt_model}分、【人工评估】{int(cnt_customer)}分\n", int(cnt_model) > int(cnt_customer)),
             (f"负责人的人员性质: 【模型评估】{nat_model}分、【人工评估】{int(nat_customer)}分", int(nat_model) > int(nat_customer)),
         ]
-        ws.cell(row=row_num, column=4, value=self._make_rich_text(b_segments))
+        ws.cell(row=row_num, column=4, value=self._make_rich_text_opt(b_segments))
 
         # 5. 作业环境和时间影响风险值 (C)
         c_score = result.get('C（作业环境和时间影响风险值）', 0)
-        loc_model = self._get_detail_score(detailed, '作业地段')
-        loc_customer = self._get_detail_customer(detailed, '作业地段')
-        typ_model = self._get_detail_score(detailed, '作业类型')
-        typ_customer = self._get_detail_customer(detailed, '作业类型')
-        wea_model = self._get_detail_score(detailed, '天气')
-        wea_customer = self._get_detail_customer(detailed, '天气')
-        tp_model = self._get_detail_score(detailed, '作业时段')
-        tp_customer = self._get_detail_customer(detailed, '作业时段')
+        loc_model = _ds('作业地段')
+        loc_customer = _dc('作业地段')
+        typ_model = _ds('作业类型')
+        typ_customer = _dc('作业类型')
+        wea_model = _ds('天气')
+        wea_customer = _dc('天气')
+        tp_model = _ds('作业时段')
+        tp_customer = _dc('作业时段')
 
         customer_c = int(loc_customer) + int(typ_customer) + int(wea_customer) + int(tp_customer)
         c_segments = [
@@ -142,7 +161,7 @@ class ExcelExporter:
             (f"天气: 【模型评估】{wea_model}分、【人工评估】{int(wea_customer)}分\n", int(wea_model) > int(wea_customer)),
             (f"作业时段: 【模型评估】{tp_model}分、【人工评估】{int(tp_customer)}分", int(tp_model) > int(tp_customer)),
         ]
-        ws.cell(row=row_num, column=5, value=self._make_rich_text(c_segments))
+        ws.cell(row=row_num, column=5, value=self._make_rich_text_opt(c_segments))
 
         # 6. 电网、设备风险联动值 (D)
         d_score = result.get('D（电网、设备风险联动值）', 0)
@@ -151,7 +170,7 @@ class ExcelExporter:
         # 7. 总分
         f_score = result.get('F（总风险值）', 0)
         total_customer = customer_b + customer_c
-        ws.cell(row=row_num, column=7, value=self._make_rich_text([
+        ws.cell(row=row_num, column=7, value=self._make_rich_text_opt([
             (f"【模型评估】{f_score}分 【人工评估】{total_customer}分", f_score > total_customer),
         ]))
 
@@ -163,17 +182,11 @@ class ExcelExporter:
         # 9. 问题描述
         ws.cell(row=row_num, column=9, value=self._generate_judgment(detailed))
 
-        # 10-11. 违章代码和条款（只要有任一评估因子标红，即模型评估>人工评估）
-        has_red = any(
-            d.get('风险值得分', 0) > d.get('客户填入分值', 0)
-            for d in detailed
-        )
-        if has_red:
-            ws.cell(row=row_num, column=10, value='D10')
-            ws.cell(row=row_num, column=11, value='信息系统的作业信息填报不正确、不规范')
-        else:
-            ws.cell(row=row_num, column=10, value='-')
-            ws.cell(row=row_num, column=11, value='-')
+        # 10. 违章代码
+        ws.cell(row=row_num, column=10, value='D10')
+
+        # 11. 违章条款
+        ws.cell(row=row_num, column=11, value='信息系统的作业信息填报不正确、不规范')
 
     def _generate_judgment(self, detailed: List[Dict]):
         """生成规则判断结果，返回 CellRichText（模型评估>人工评估的片段标红）"""
@@ -255,7 +268,7 @@ class ExcelExporter:
             last_text, last_red = segments[-1]
             segments[-1] = (last_text.rstrip('\n'), last_red)
 
-        return self._make_rich_text(segments)
+        return self._make_rich_text_opt(segments)
 
     @staticmethod
     def _is_awareness_factor(factor: str) -> bool:
@@ -306,10 +319,28 @@ class ExcelExporter:
             blocks.append(TextBlock(font, text))
         return CellRichText(*blocks)
 
+    @staticmethod
+    def _make_rich_text_opt(segments):
+        """
+        优化版富文本构建：当没有任何片段需要标红时，直接返回纯文本字符串，
+        避免创建 CellRichText 对象（大幅减少 openpyxl 内部开销）。
+        segments: List[Tuple[str, bool]]  每个元素为 (文本, 是否标红)
+        """
+        has_red = any(is_red for _, is_red in segments)
+        if not has_red:
+            return ''.join(text for text, _ in segments)
+        return ExcelExporter._make_rich_text(segments)
+
     # ==================== Excel 美化 ====================
 
-    def _beautify(self, ws):
-        """美化 Excel 工作表（在保存前执行，保留富文本格式）"""
+    def _beautify(self, ws, row_count: int):
+        """
+        美化 Excel 工作表（在保存前执行，保留富文本格式）
+
+        优化：
+        - 单次遍历完成样式设置 + 列宽计算
+        - 大数据量时列宽采用采样策略（避免全量 encode 计算）
+        """
         header_fill = PatternFill(start_color='4472C4', end_color='4472C4', fill_type='solid')
         header_font = Font(color='FFFFFF', bold=True, name='微软雅黑')
         content_font = Font(name='微软雅黑', size=10)
@@ -320,30 +351,49 @@ class ExcelExporter:
         center_align = Alignment(horizontal='center', vertical='center', wrap_text=True)
         left_align = Alignment(horizontal='left', vertical='center', wrap_text=True)
 
-        # 调整列宽
-        for col_cells in ws.columns:
-            col_letter = col_cells[0].column_letter
-            max_len = 0
-            for cell in col_cells:
-                try:
-                    if cell.value:
-                        max_len = max(max_len, len(str(cell.value).encode('gbk')))
-                except Exception:
-                    pass
-            ws.column_dimensions[col_letter].width = min(max(max_len + 2, 12), 50)
+        # 列宽采样策略：超过阈值时只采样部分行以节省时间
+        SAMPLE_THRESHOLD = 200
+        SAMPLE_HEAD = 100  # 前 N 行始终采样
+        # 每隔 N 行采样一行
+        sample_interval = max(1, row_count // 100) if row_count > SAMPLE_THRESHOLD else 1
 
-        # 设置样式
-        for row in ws.iter_rows():
+        col_widths = [0] * (len(self.HEADERS) + 1)  # 1-based 索引
+
+        for row_idx, row in enumerate(ws.iter_rows()):
+            row_num = row_idx + 1
+
+            # 判断是否参与列宽计算（采样逻辑）
+            should_sample = (
+                row_count <= SAMPLE_THRESHOLD
+                or row_num == 1  # 表头始终参与
+                or row_num <= SAMPLE_HEAD
+                or (row_num - SAMPLE_HEAD) % sample_interval == 0
+            )
+
             for cell in row:
+                # ── 设置样式 ──
                 cell.border = thin_border
-                if cell.row == 1:
+                if row_num == 1:
                     cell.fill = header_fill
                     cell.font = header_font
                     cell.alignment = center_align
                 else:
                     cell.alignment = left_align if cell.column in self.LEFT_ALIGN_COLS else center_align
-                    # 富文本单元格已有自己的字体格式，不覆盖
                     if not isinstance(cell.value, CellRichText):
                         cell.font = content_font
+
+                # ── 列宽计算（采样） ──
+                if should_sample and cell.value:
+                    try:
+                        length = len(str(cell.value).encode('gbk'))
+                        if length > col_widths[cell.column]:
+                            col_widths[cell.column] = length
+                    except Exception:
+                        pass
+
+        # 设置列宽
+        for col_idx, width in enumerate(col_widths[1:], 1):
+            col_letter = ws.cell(row=1, column=col_idx).column_letter
+            ws.column_dimensions[col_letter].width = min(max(width + 2, 12), 50)
 
         ws.freeze_panes = 'A2'

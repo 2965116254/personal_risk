@@ -96,24 +96,6 @@ class RiskAssessor:
             print(f"分类结果：数字ID {len(user_ids)} 个，中文名字 {len(user_names)} 个"
                   f"（本次新增 {len(new_user_id_types)} 项）")
 
-            # 7.5 重试评估失败的工作票（模型并发等待后跳过、API异常等）
-            if new_tickets:
-                retry_tickets = self._find_failed_tickets(new_tickets, llm_results, loc_results, lt_results)
-                if retry_tickets:
-                    print(f"首次评估有 {len(retry_tickets)} 条失败，开始重试...")
-                    # 为每个重试票携带原始 idx，确保 ticket_key 一致
-                    retry_tickets_with_idx = []
-                    for ticket, orig_idx in retry_tickets:
-                        t = dict(ticket)
-                        t['_retry_orig_idx'] = orig_idx
-                        retry_tickets_with_idx.append(t)
-                    retry_llm, retry_loc, retry_lt, _ = self._run_llm_evaluations(
-                        retry_tickets_with_idx, skip_work_codes=set()
-                    )
-                    self._merge_retry_results(llm_results, loc_results, lt_results,
-                                              retry_llm, retry_loc, retry_lt, retry_tickets_with_idx)
-                    print(f"重试完成，已合并 {len(retry_llm)} 条重试结果")
-
             # 8. 合并缓存的大模型结果
             if cached_llm:
                 self._merge_cached_llm_results(llm_results, loc_results, lt_results,
@@ -588,10 +570,8 @@ class RiskAssessor:
             work_task = (ticket.get('work_task') or '').strip()
             if not work_task:
                 continue
-            # 重试时使用原始 idx，保证 ticket_key 与首次评估一致
-            effective_idx = ticket.get('_retry_orig_idx', idx)
             work_code = ticket.get('work_code', '')
-            ticket_key = f"{ticket.get('ticket_no', '')}_{effective_idx}"
+            ticket_key = f"{ticket.get('ticket_no', '')}_{idx}"
 
             # 缓存命中：跳过，用占位符 None 填充
             if work_code in skip_work_codes:
@@ -670,47 +650,6 @@ class RiskAssessor:
             return task_results, loc_results, lt_results, classify_results
         finally:
             loop.close()
-
-    def _find_failed_tickets(self, new_tickets: List[Dict],
-                              llm_results: Dict, loc_results: Dict, lt_results: Dict) -> List[Tuple[Dict, int]]:
-        """找出 LLM 评估失败的工作票（结果缺失或 rule 为 '无'/'转态非200'）
-        :return: [(ticket, original_idx), ...] 需要重试的工作票及其原始索引
-        """
-        failed = []
-        for idx, ticket in enumerate(new_tickets):
-            work_task = (ticket.get('work_task') or '').strip()
-            if not work_task:
-                continue
-            ticket_key = f"{ticket.get('ticket_no', '')}_{idx}"
-            llm = llm_results.get(ticket_key)
-            if llm is None:
-                failed.append((ticket, idx))
-                continue
-            rule = llm.get('rule', '')
-            if rule in ('无', '转态非200'):
-                failed.append((ticket, idx))
-        return failed
-
-    def _merge_retry_results(self, llm_results: Dict, loc_results: Dict, lt_results: Dict,
-                              retry_llm: Dict, retry_loc: Dict, retry_lt: Dict,
-                              retry_tickets: List[Dict]):
-        """将重试结果合并到主结果字典中（覆盖失败的旧结果）"""
-        for ticket in retry_tickets:
-            orig_idx = ticket.get('_retry_orig_idx', 0)
-            ticket_key = f"{ticket.get('ticket_no', '')}_{orig_idx}"
-            if ticket_key in retry_llm:
-                llm = retry_llm[ticket_key]
-                old_rule = llm_results.get(ticket_key, {}).get('rule', '无')
-                new_rule = llm.get('rule', '无')
-                if new_rule not in ('无', '转态非200'):
-                    llm_results[ticket_key] = llm
-                    print(f"  [重试成功] {ticket.get('work_code','')} rule:{old_rule} → {new_rule}")
-                else:
-                    print(f"  [重试仍失败] {ticket.get('work_code','')} rule:{new_rule}")
-            if ticket_key in retry_loc:
-                loc_results[ticket_key] = retry_loc[ticket_key]
-            if ticket_key in retry_lt:
-                lt_results[ticket_key] = retry_lt[ticket_key]
 
     # ==================== 缓存合并方法 ====================
 

@@ -40,9 +40,8 @@ logging.basicConfig(
 
 logger = logging.getLogger(__name__)
 
-# 清理旧日志文件（保留30天）
-from data_cache import CacheManager
-CacheManager.clean_old_logs(keep_days=30)
+from data_cache import DataCache
+DataCache.clean_old_logs(keep_days=30)
 
 class LogWriter:
     """将 stdout 输出重定向到 logger，使所有模块的 print() 都写入日志"""
