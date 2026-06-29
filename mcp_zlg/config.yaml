@@ -1,0 +1,6 @@
+# ==================== MCP 服务配置 ====================
+# 数据库配置使用主项目 config/config.yaml 中的 database_new
+mcp:
+  host: "0.0.0.0"                    # 绑定地址
+  port: 8766                         # MCP服务端口
+  timeout_seconds: 120               # 超时时间（秒）
