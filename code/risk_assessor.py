@@ -7,6 +7,7 @@
 
 import os
 import sys
+import time
 import logging
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
@@ -23,6 +24,22 @@ from config_loader import get_llm_max_concurrent
 
 class RiskAssessor:
     """风险评估核心编排类"""
+
+    # 局编码与地市局映射
+    BUREAU_MAP = {
+        '0101': '广州局',
+        '0102': '贵阳局',
+        '0103': '南宁局',
+        '0104': '柳州局',
+        '0105': '梧州局',
+        '0106': '百色局',
+        '0107': '天生桥局',
+        '0108': '曲靖局',
+        '0109': '昆明局',
+        '0110': '大理局',
+        '0120': '电科院',
+        '0112': '海口分局',
+    }
 
     def __init__(self, db_config: Dict):
         self.db_config = db_config
@@ -67,7 +84,7 @@ class RiskAssessor:
             # 4. 查询违章记录
             peccancy_dict = self.fetcher.fetch_peccancy_records(all_user_ids)
 
-            # 5. 加载人员ID类型缓存，快速分类（正则 + 缓存，不调LLM）
+            # 5. 加载人员ID类型缓存（全量加载，user_id_types 体积小无需过滤）
             user_id_type_cache = cache.load_all_user_id_types() if use_cache else {}
             user_ids, user_names, need_llm_classify, cache_hit_count = self._fast_classify_user_ids(
                 all_user_ids, peccancy_dict, user_id_type_cache=user_id_type_cache
@@ -79,22 +96,33 @@ class RiskAssessor:
             hot_work_dict = self.fetcher.fetch_hot_work_tickets(list(work_codes))
 
             # 7. 合并并发：人员分类 + 工作票评估（共享同一个事件循环和信号量）
-            llm_results, loc_results, lt_results, classify_results = self._run_llm_evaluations(
-                work_tickets, skip_work_codes=skip_work_codes,
-                classify_items=need_llm_classify
-            )
+            # 优化：无新票 + 所有人员ID已缓存 → 跳过LLM调用，直接用缓存结果
+            can_skip_llm = (use_cache
+                            and len(new_tickets) == 0
+                            and len(need_llm_classify) == 0
+                            and len(cached_llm) > 0)
+            if can_skip_llm:
+                print(f"所有 {len(work_tickets)} 条工作票和人员ID均已缓存，跳过LLM调用")
+                llm_results, loc_results, lt_results = {}, {}, {}
+                classify_results = {}
+                new_user_id_types = {}
+            else:
+                llm_results, loc_results, lt_results, classify_results = self._run_llm_evaluations(
+                    work_tickets, skip_work_codes=skip_work_codes,
+                    classify_items=need_llm_classify
+                )
 
-            # 7.1 完成人员分类
-            new_user_id_types = {}
-            if classify_results:
-                for item, is_name in classify_results.items():
-                    new_user_id_types[item] = is_name
-                    if is_name:
-                        user_names.append(item)
-                    else:
-                        user_ids.append(item)
-            print(f"分类结果：数字ID {len(user_ids)} 个，中文名字 {len(user_names)} 个"
-                  f"（本次新增 {len(new_user_id_types)} 项）")
+                # 7.1 完成人员分类
+                new_user_id_types = {}
+                if classify_results:
+                    for item, is_name in classify_results.items():
+                        new_user_id_types[item] = is_name
+                        if is_name:
+                            user_names.append(item)
+                        else:
+                            user_ids.append(item)
+                print(f"分类结果：数字ID {len(user_ids)} 个，中文名字 {len(user_names)} 个"
+                      f"（本次新增 {len(new_user_id_types)} 项）")
 
             # 8. 合并缓存的大模型结果
             if cached_llm:
@@ -102,15 +130,22 @@ class RiskAssessor:
                                                cached_llm, work_tickets)
 
             # 9. 批量查询作业计划详情
+            t0 = time.time()
             work_plan_details = self.fetcher.fetch_work_plan_details(list(work_codes))
+            print(f"[耗时] 查询作业计划详情: {time.time() - t0:.1f}s, 获取 {len(work_plan_details)} 条")
 
             # 10. 批量查询客户填入的动态风险分值
+            t0 = time.time()
             dynamic_risk_dict = self.fetcher.fetch_dynamic_risk_scores(list(work_codes))
+            print(f"[耗时] 查询动态风险分值: {time.time() - t0:.1f}s, 获取 {len(dynamic_risk_dict)} 条")
 
             # 11. 批量查询基准关系
+            t0 = time.time()
             benchmark_dict = self.fetcher.fetch_benchmark_relations(list(work_codes), work_plan_details)
+            print(f"[耗时] 查询基准关系: {time.time() - t0:.1f}s, 获取 {len(benchmark_dict)} 条")
 
             # 12. 逐张计算风险值
+            t0 = time.time()
             results = []
             for idx, ticket in enumerate(work_tickets):
                 result = self._calc_single_ticket(
@@ -119,6 +154,7 @@ class RiskAssessor:
                     work_plan_details, dynamic_risk_dict, benchmark_dict,
                 )
                 results.append(result)
+            print(f"[耗时] 逐张计算风险值: {time.time() - t0:.1f}s, 共 {len(results)} 条")
 
             print(f"共评估 {len(results)} 条工作计划编号")
 
@@ -214,8 +250,32 @@ class RiskAssessor:
         # D: 电网、设备风险联动值（暂不计算）
         D = 0
 
-        # F: 总风险值
-        F = B + C + D
+        # A: 基准风险值（典型基准风险值）
+        # 输电风险值A = Amax * an
+        # Amax = 最高的单项作业风险值
+        # an = 作业风险系数: n=1→1, 1<n≤3→1.1, n>3→1.2
+        benchmark_items = benchmark_dict.get(work_code, [])
+        A = 0
+        A_details = {'Amax': 0, 'an': 0, 'n': 0}
+        if benchmark_items:
+            n = len(benchmark_items)
+            if n == 1:
+                an = 1.0
+            elif n <= 3:  # 1 < n <= 3
+                an = 1.1
+            else:  # n > 3
+                an = 1.2
+            risk_values = []
+            for item in benchmark_items:
+                rv = item.get('risk_value')
+                if rv is not None:
+                    risk_values.append(float(rv))
+            Amax = max(risk_values) if risk_values else 0
+            A = Amax * an
+            A_details = {'Amax': Amax, 'an': an, 'n': n}
+
+        # F: 总风险值（含基准风险值A）
+        F = B + C + D + A
 
         # --- 生成详细评估结果 ---
         detailed_results = self._build_detailed_results(
@@ -226,14 +286,19 @@ class RiskAssessor:
             work_location_score, work_type_score, has_hot_work,
             work_time_period, work_time_period_score,
             llm_results, llm_location_results,
-            work_plan,
+            work_plan, A, A_details,
         )
 
+        bureau_code = ticket.get('bureau_code', '')
         return {
             '工作票票号': ticket.get('ticket_no'),
             '作业计划编号': work_code,
+            '工作内容': ticket.get('work_content', ''),
             '工作任务': work_task,
+            '局编码': bureau_code,
+            '地市局': self.BUREAU_MAP.get(bureau_code, ''),
             '基准关系': benchmark_dict.get(work_code, []),
+            'A（基准风险值）': A,
             'B（作业人员能力风险值）': B,
             'C（作业环境和时间影响风险值）': C,
             'D（电网、设备风险联动值）': D,
@@ -322,6 +387,7 @@ class RiskAssessor:
         work_time_period: str, work_time_period_score: int,
         llm_results: Dict, llm_location_results: Dict,
         work_plan: Dict,
+        A: float = 0, A_details: Dict = None,
     ) -> List[Dict]:
         """构建详细评估结果列表"""
         results = []
@@ -397,6 +463,22 @@ class RiskAssessor:
             ticket, work_code, '作业时段', '作业时段',
             time_period_result, work_time_period_score,
             customer_scores.get('作业时段', 0),
+        ))
+
+        # 8. 基准风险值（A值）
+        # 基准风险值由规则计算得出，模型评估和人工评估采用相同分值
+        A_details = A_details or {'Amax': 0, 'an': 0, 'n': 0}
+        Amax = A_details.get('Amax', 0)
+        an = A_details.get('an', 0)
+        n = A_details.get('n', 0)
+        if n > 0:
+            benchmark_result = f"Amax={Amax}, an={an}, n={n}, A={A}分"
+        else:
+            benchmark_result = "无基准项目"
+        results.append(self._make_detail(
+            ticket, work_code, '基准风险值', '基准风险值',
+            benchmark_result, int(A),
+            int(A),  # 基准风险值由规则计算，人工评估同分
         ))
 
         return results
@@ -613,10 +695,15 @@ class RiskAssessor:
                         self.engine.is_chinese_name(item, sem, session) for item in classify_items
                     ]
 
-                    # 只并发执行非 None 的协程
+                    # 只并发执行非 None 的协程，分批执行避免一次性调度过多协程导致 event loop 阻塞
                     all_coros = [c for c in (task_coros + loc_coros + lt_coros + classify_coros) if c is not None]
                     if all_coros:
-                        return await asyncio.gather(*all_coros)
+                        results = []
+                        batch_size = 200
+                        for i in range(0, len(all_coros), batch_size):
+                            batch = all_coros[i:i + batch_size]
+                            results.extend(await asyncio.gather(*batch))
+                        return results
                     return []
 
             results = loop.run_until_complete(evaluate_all())
@@ -791,7 +878,14 @@ class RiskAssessor:
                     sem = Semaphore(get_llm_max_concurrent())
                     task_coros = [self.engine.evaluate_work_task(wt, sem, session) for _, wt in tasks]
                     loc_coros = [self.engine.evaluate_work_location(wt, sem, session) for _, wt in tasks]
-                    return await asyncio.gather(*task_coros, *loc_coros)
+                    # 分批执行，避免一次性调度过多协程导致 event loop 阻塞
+                    all_coros = task_coros + loc_coros
+                    results = []
+                    batch_size = 200
+                    for i in range(0, len(all_coros), batch_size):
+                        batch = all_coros[i:i + batch_size]
+                        results.extend(await asyncio.gather(*batch))
+                    return results
 
             results = loop.run_until_complete(evaluate_all())
             n = len(tasks)

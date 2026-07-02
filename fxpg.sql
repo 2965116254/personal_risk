@@ -3,6 +3,7 @@ SELECT
     wp.work_code,             -- 作业计划编号
     wb.ticket_no,             -- 工作票票号
     wb.ticket_source_id,      -- 作业计划表关联ID
+    wp.work_content,          -- 工作内容
     wb.work_principal_uid,    -- 工作负责人ID
     wb.work_principal_uname,  -- 工作负责人姓名
     wb.work_member_uid,       -- 工作班人员ID
@@ -10,6 +11,22 @@ SELECT
     wb.guardian_uid,          -- 专责监护人ID
     wb.guardian_uname,        -- 专责监护人姓名
     wb.work_member_count,     -- 工作班人员总数
+    wp.bureau_code,           -- 局编码
+    CASE wp.bureau_code
+        WHEN '0101' THEN '广州局'
+        WHEN '0102' THEN '贵阳局'
+        WHEN '0103' THEN '南宁局'
+        WHEN '0104' THEN '柳州局'
+        WHEN '0105' THEN '梧州局'
+        WHEN '0106' THEN '百色局'
+        WHEN '0107' THEN '天生桥局'
+        WHEN '0108' THEN '曲靖局'
+        WHEN '0109' THEN '昆明局'
+        WHEN '0110' THEN '大理局'
+        WHEN '0120' THEN '电科院'
+        WHEN '0112' THEN '海口分局'
+        ELSE ''
+    END AS `地市局`,
     CASE wp.task_main
         WHEN '1.0' THEN '本单位'
         WHEN '2.0' THEN '分包作业'

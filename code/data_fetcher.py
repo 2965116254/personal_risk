@@ -9,6 +9,7 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
 import mysql.connector
+from mysql.connector.cursor import MySQLCursorDict
 from typing import List, Dict, Optional, Set, Tuple
 import sql_queries
 
@@ -22,36 +23,77 @@ class DataFetcher:
         self.cursor = None
 
     def connect(self):
-        """建立数据库连接"""
+        """建立数据库连接（使用无缓冲游标，避免大数据量时客户端内存溢出）"""
         self.connection = mysql.connector.connect(
             host=self.db_config['host'],
             port=self.db_config['port'],
             user=self.db_config['user'],
             password=self.db_config['password'],
             database=self.db_config['database'],
+            connection_timeout=30,
         )
-        self.cursor = self.connection.cursor(dictionary=True)
+        # 使用 SSCursor（无缓冲游标）：结果集在服务端按需获取，避免客户端 C 层一次性缓存全部数据
+        self.cursor = self.connection.cursor(dictionary=True, buffered=False)
 
     def close(self):
-        """关闭数据库连接"""
-        if self.cursor:
-            self.cursor.close()
-        if self.connection:
-            self.connection.close()
+        """关闭数据库连接（兼容 SSCursor 未读结果）"""
+        try:
+            if self.cursor:
+                self.cursor.close()
+        except Exception:
+            pass
+        try:
+            if self.connection:
+                self.connection.close()
+        except Exception:
+            pass
+
+    def _consume_pending(self):
+        """消费 SSCursor 中可能残留的未读取结果（兜底保护）"""
+        try:
+            while True:
+                row = self.cursor.fetchone()
+                if row is None:
+                    break
+        except Exception:
+            pass
 
     def fetchone(self, query: str, params=None) -> Optional[Dict]:
         """执行查询并返回单条记录"""
+        self._consume_pending()
         self.cursor.execute(query, params or ())
         result = self.cursor.fetchone()
-        self.cursor.fetchall()  # 清空未读取结果
+        # SSCursor 必须消费完所有结果才能执行下一条查询
+        self._consume_pending()
         return result
 
     def fetchall(self, query: str, params=None) -> List[Dict]:
         """执行查询并返回所有记录"""
+        self._consume_pending()
         self.cursor.execute(query, params or ())
         results = self.cursor.fetchall()
-        self.cursor.fetchall()  # 清空未读取结果
+        # SSCursor 下 fetchall() 已取完所有数据，无需再次清空
         return results
+
+    # ==================== 分批查询辅助 ====================
+
+    def _batch_query(self, query_template: str, ids: List[str], batch_size: int = 5000) -> List[Dict]:
+        """
+        将 ID 列表分批执行 IN 查询，避免单次 IN 子句过长导致 SQL 报错
+        使用 buffered cursor：每批最多 5000 行，内存占用可忽略，网络往返只需 1 次
+        """
+        all_results = []
+        buf = self.connection.cursor(dictionary=True, buffered=True)
+        try:
+            for i in range(0, len(ids), batch_size):
+                batch = ids[i:i + batch_size]
+                placeholders = ','.join(['%s'] * len(batch))
+                query = query_template.format(placeholders=placeholders)
+                buf.execute(query, batch)
+                all_results.extend(buf.fetchall())
+        finally:
+            buf.close()
+        return all_results
 
     # ==================== 操作票查询 ====================
 
@@ -68,6 +110,7 @@ class DataFetcher:
             wp.work_code,
             wb.ticket_no,
             wb.ticket_source_id,
+            wp.bureau_code,
             wp.plan_start_time,
             wp.plan_end_time,
             wp.actual_start_time,
@@ -85,6 +128,7 @@ class DataFetcher:
                 ELSE ''
             END AS task_main,
             wp.task_type,
+            wp.work_content,
             wb.work_task
         FROM sp_ss_rc_work_plan wp
         LEFT JOIN (
@@ -120,12 +164,12 @@ class DataFetcher:
         """
         if not work_codes:
             return []
-        placeholders = ','.join(['%s'] * len(work_codes))
-        query = f"""
+        query = """
         SELECT
             wp.work_code,
             wb.ticket_no,
             wb.ticket_source_id,
+            wp.bureau_code,
             wp.plan_start_time,
             wp.plan_end_time,
             wp.actual_start_time,
@@ -143,6 +187,7 @@ class DataFetcher:
                 ELSE ''
             END AS task_main,
             wp.task_type,
+            wp.work_content,
             wb.work_task
         FROM sp_ss_rc_work_plan wp
         LEFT JOIN (
@@ -157,19 +202,18 @@ class DataFetcher:
         LEFT JOIN sp_pd_wticket_base wb ON re.wticket_id = wb.id
         WHERE wp.work_code IN ({placeholders})
         """
-        return self.fetchall(query, list(work_codes))
+        return self._batch_query(query, work_codes)
 
     # ==================== 违章记录查询 ====================
 
     def fetch_peccancy_records(self, user_ids: List[str]) -> Dict[str, Dict[str, int]]:
         """
-        批量查询违章记录
+        批量查询违章记录（分批查询，避免 IN 子句过长）
         :return: {user_key: {'A': count, 'B': count, ...}, ...}
         """
         if not user_ids:
             return {}
-        placeholders = ','.join(['%s'] * len(user_ids))
-        query = f"""
+        query = """
         SELECT peccancy_uid, peccancy_code, peccancy_uname, COUNT(*) AS count, record_date
         FROM sp_ss_uq_peccancy_list_log 
         WHERE peccancy_uid IN ({placeholders})
@@ -177,7 +221,7 @@ class DataFetcher:
         AND record_date < DATE_FORMAT(CURDATE() + INTERVAL 1 YEAR, '%Y-01-01')
         GROUP BY peccancy_uid, peccancy_code, peccancy_uname, record_date;
         """
-        records = self.fetchall(query, list(user_ids))
+        records = self._batch_query(query, user_ids)
 
         peccancy_dict = {}
         for r in records:
@@ -199,15 +243,14 @@ class DataFetcher:
         """
         if not work_codes:
             return {}
-        placeholders = ','.join(['%s'] * len(work_codes))
-        query = f"""
+        query = """
         SELECT wp.work_code, wf.ticket_no AS '动火票票号'
         FROM sp_ss_rc_work_plan wp 
         LEFT JOIN sp_pd_wticket_business_re wbr ON wp.work_code = wbr.business_name 
         LEFT JOIN sp_pd_wticket_fire wf ON wbr.wticket_id = wf.wticket_id 
         WHERE wp.work_code IN ({placeholders}) AND wf.ticket_no IS NOT NULL
         """
-        records = self.fetchall(query, list(work_codes))
+        records = self._batch_query(query, work_codes)
         return {r['work_code']: r.get('动火票票号') for r in records}
 
     # ==================== 作业计划详情查询 ====================
@@ -219,15 +262,14 @@ class DataFetcher:
         """
         if not work_codes:
             return {}
-        placeholders = ','.join(['%s'] * len(work_codes))
-        query = f"""
+        query = """
         SELECT id, work_code, work_place, major_sub_type, work_content,
                release_time, plan_start_time, plan_end_time,
                actual_start_time, actual_end_time
         FROM sp_ss_rc_work_plan
         WHERE work_code IN ({placeholders})
         """
-        records = self.fetchall(query, list(work_codes))
+        records = self._batch_query(query, work_codes)
         return {r['work_code']: r for r in records}
 
     # ==================== 动态风险分值查询 ====================
@@ -239,14 +281,13 @@ class DataFetcher:
         """
         if not work_codes:
             return {}
-        placeholders = ','.join(['%s'] * len(work_codes))
-        query = f"""
+        query = """
         SELECT A.WORK_CODE, B.ITEM_NAME AS ASSESS_FACTOR, B.ASSESS_VALUE AS CUSTOMER_SCORE
         FROM sp_ss_rc_work_plan A
         LEFT JOIN sp_ss_rc_dynamic_risk_assess B ON A.ID = B.WORK_PLAN_ID
         WHERE A.WORK_CODE IN ({placeholders})
         """
-        records = self.fetchall(query, list(work_codes))
+        records = self._batch_query(query, work_codes)
         result = {}
         for r in records:
             wc = r['WORK_CODE']
@@ -266,9 +307,8 @@ class DataFetcher:
         """
         if not work_codes:
             return {}
-        placeholders = ','.join(['%s'] * len(work_codes))
-        query = sql_queries.BENCHMARK_RELATION_QUERY.format(placeholders=placeholders)
-        records = self.fetchall(query, list(work_codes))
+        query = sql_queries.BENCHMARK_RELATION_QUERY
+        records = self._batch_query(query, work_codes)
         return self._group_benchmark_records(records, work_plan_details or {})
 
     @staticmethod
@@ -288,9 +328,12 @@ class DataFetcher:
             if wc:
                 if wc not in result:
                     result[wc] = []
+                rv = r.get('RISK_VALUE')
+                if rv is None:
+                    rv = 0
                 result[wc].append({
                     'benchmark_name': r.get('BENCHMARK_NAME', ''),
-                    'risk_value': r.get('RISK_VALUE', 0),
+                    'risk_value': rv,
                 })
         return result
 
@@ -320,9 +363,8 @@ class DataFetcher:
         """
         if not user_ids:
             return {}
-        placeholders = ','.join(['%s'] * len(user_ids))
-        query = sql_queries.BATCH_SAME_TYPE_QUERY.format(placeholders=placeholders)
-        records = self.fetchall(query, list(user_ids))
+        query = sql_queries.BATCH_SAME_TYPE_QUERY
+        records = self._batch_query(query, user_ids)
         result = {}
         for r in records:
             uid = r['leader_uid']
@@ -339,6 +381,7 @@ class DataFetcher:
         """创建预计算结果表"""
         query = sql_queries.CREATE_MACHINE_DAILY_RESULT_TABLE
         self.cursor.execute(query)
+        self.cursor.fetchall()  # SSCursor 必须消费结果
         self.connection.commit()
 
     def insert_daily_result(self, record: Dict):
@@ -363,3 +406,4 @@ class DataFetcher:
             record['work_member_count'], record['principal_nature'],
             record['work_location'], record['work_type'], record['plan_nature'],
         ))
+        self.cursor.fetchall()  # SSCursor 必须消费结果

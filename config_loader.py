@@ -223,9 +223,9 @@ def get_llm_max_concurrent():
     return get_config().get('llm', {}).get('max_concurrent', 50)
 
 
-def get_llm_max_concurrent():
-    """获取大模型最大并发调用数，默认50"""
-    return get_config().get('llm', {}).get('max_concurrent', 50)
+def get_violation_api_config():
+    """获取违规待处理记录API配置"""
+    return get_config().get('violation_api', {})
 
 
 def get_retention_days():

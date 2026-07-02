@@ -68,18 +68,25 @@ class DataCache:
         """获取所有已处理过的 work_code 集合"""
         return set(self.load_all_cache().keys())
 
-    def load_all_user_id_types(self) -> Dict[str, bool]:
+    def load_all_user_id_types(self, filter_user_ids: Set[str] = None) -> Dict[str, bool]:
         """
         加载所有历史缓存中的人员ID类型判断结果
+        :param filter_user_ids: 可选，只加载该集合内的人员ID类型，减少内存占用
         :return: {user_id: is_chinese_name}，True=中文姓名，False=数字ID
         """
         all_types = {}
         for filepath in self._get_all_cache_files():
+            if filter_user_ids is not None and not filter_user_ids:
+                break
             try:
                 with open(filepath, 'r', encoding='utf-8') as f:
                     data = json.load(f)
                 user_id_types = data.get("user_id_types", {})
-                all_types.update(user_id_types)
+                if filter_user_ids is not None:
+                    filtered = {uid: user_id_types[uid] for uid in user_id_types if uid in filter_user_ids}
+                    all_types.update(filtered)
+                else:
+                    all_types.update(user_id_types)
             except (json.JSONDecodeError, KeyError, IOError) as e:
                 print(f"警告: 读取缓存文件 {filepath} 的人员ID类型失败: {e}，将自动删除该损坏文件")
                 try:
@@ -93,31 +100,47 @@ class DataCache:
 
     def find_new_tickets(self, work_tickets: List[Dict]) -> Tuple[List[Dict], Dict[str, Dict]]:
         """
-        对比缓存，找出新增的工作票
+        对比缓存，找出新增的工作票（按需加载，只保留当前批次需要的记录，避免全量缓存堆积内存）
         :param work_tickets: 当前查询到的所有工作票
         :return: (new_tickets, cached_llm_results)
             - new_tickets: 需要大模型评估的新票
             - cached_llm_results: 缓存中已有的大模型结果 {work_code: {llm_result, llm_location, llm_location_type}}
         """
-        all_cache = self.load_all_cache()
-        cached_work_codes = set(all_cache.keys())
+        # 当前批次需要的 work_code 集合
+        current_codes = {t.get("work_code", "") for t in work_tickets if t.get("work_code")}
+        if not current_codes:
+            return list(work_tickets), {}
+
+        cached_llm_results = {}
+        hit_codes = set()
+
+        for filepath in self._get_all_cache_files():
+            if not current_codes:
+                break
+            try:
+                with open(filepath, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+                records = data.get("records", {})
+                for wc in records:
+                    if wc in current_codes and wc not in hit_codes:
+                        rec = records[wc]
+                        cached_llm_results[wc] = {
+                            "llm_result": rec.get("llm_result", ""),
+                            "llm_location": rec.get("llm_location", ""),
+                            "llm_location_type": rec.get("llm_location_type", ""),
+                        }
+                        hit_codes.add(wc)
+            except (json.JSONDecodeError, KeyError, IOError) as e:
+                print(f"警告: 读取缓存文件 {filepath} 失败: {e}，将自动删除该损坏文件")
+                try:
+                    os.remove(filepath)
+                except OSError:
+                    pass
 
         new_tickets = []
-        cached_llm_results = {}
-
         for ticket in work_tickets:
             wc = ticket.get("work_code", "")
-            if not wc:
-                new_tickets.append(ticket)
-                continue
-
-            if wc in cached_work_codes:
-                cached_llm_results[wc] = {
-                    "llm_result": all_cache[wc].get("llm_result", ""),
-                    "llm_location": all_cache[wc].get("llm_location", ""),
-                    "llm_location_type": all_cache[wc].get("llm_location_type", ""),
-                }
-            else:
+            if not wc or wc not in hit_codes:
                 new_tickets.append(ticket)
 
         print(f"增量对比: 共 {len(work_tickets)} 条，"

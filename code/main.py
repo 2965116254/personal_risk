@@ -96,6 +96,86 @@ def upload_to_minio(local_file_path, object_name=None):
 
 # ==================== Elink 发送 ====================
 
+# ==================== 违规待处理记录 API ====================
+
+def _build_violation_description(detailed_results):
+    """从详细评估结果构建违规描述文本"""
+    differences = [d for d in detailed_results if d.get('风险值得分', 0) != d.get('客户填入分值', 0)]
+    if not differences:
+        return '模型评估结果与客户填写结果一致'
+
+    parts = []
+    for diff in differences:
+        factor = diff.get('评估因子', '')
+        rule_score = diff.get('风险值得分', 0)
+        customer_score = diff.get('客户填入分值', 0)
+        parts.append(f"{factor}: 模型评估{rule_score}分，人工评估{customer_score}分")
+    return '；'.join(parts)
+
+
+def send_violation_records(results):
+    """批量新增违章待处理记录（在导出Excel前调用）"""
+    violation_config = config_loader.get_violation_api_config()
+    if not violation_config.get('enabled', False):
+        print("违规待处理记录API未启用，跳过")
+        return
+
+    base_url = violation_config.get('base_url', '').rstrip('/')
+    path = violation_config.get('batch_create_path', '/api/violation-pending/batch-create')
+    timeout = violation_config.get('timeout_seconds', 30)
+    url = f"{base_url}{path}"
+
+    if not results:
+        print("无评估结果，跳过违规待处理记录创建")
+        return
+
+    payload = []
+    for result in results:
+        dept_code = result.get('局编码', '')
+        if not dept_code:
+            continue
+
+        detailed = result.get('详细评估结果', [])
+        description = _build_violation_description(detailed)
+
+        payload.append({
+            "deptCode": dept_code,
+            "workSite": None,
+            "violationCode": "D10",
+            "description": description,
+            "wticketNo": result.get('工作票票号', ''),
+            "workPlanNo": result.get('作业计划编号', ''),
+            "oticketNo": None,
+            "taskStage": None,
+            "sourceAgent": 3,
+            "imageUrl": None,
+        })
+
+    if not payload:
+        print("没有有效的局编码数据，跳过违规待处理记录创建")
+        return
+
+    import urllib.request
+    import json
+
+    data = json.dumps(payload).encode('utf-8')
+    req = urllib.request.Request(
+        url,
+        data=data,
+        headers={'Content-Type': 'application/json'},
+        method='POST',
+    )
+
+    try:
+        resp = urllib.request.urlopen(req, timeout=timeout)
+        status = resp.status
+        resp_body = resp.read().decode('utf-8')
+        print(f"违规待处理记录API响应: status={status}, body={resp_body[:500]}")
+        print(f"成功发送 {len(payload)} 条违规待处理记录")
+    except Exception as e:
+        print(f"违规待处理记录API调用失败: {e}")
+
+
 def send_file_via_elink(file_path, touser_id=None, message_type=None):
     """通过 elink 发送文件"""
     elink_config = config_loader.get_elink_config()
@@ -161,15 +241,28 @@ def run_risk_calculation():
         print(f"测试模式: {config.get('test_mode', False)}, 限制记录数: {limit}")
         print(f"时间过滤: 排除plan_end_time<={cutoff_date} | plan_start_time范围: {start_date} ~ {end_date}")
 
+        # 特定计划编号测试模式
+        work_codes = None
+        if config.get('specific_plan_num_test_mode', False):
+            work_codes = config.get('work_code', [])
+            if work_codes:
+                print(f"特定计划编号测试模式: {work_codes}")
+
         # 执行风险评估
         assessor = RiskAssessor(db_config)
         results = assessor.assess(limit=limit, cutoff_date=cutoff_date, start_date=start_date, end_date=end_date,
-                                  incremental_output=True)
+                                  incremental_output=True, work_codes=work_codes)
 
         if not results:
             print("没有增量数据，输出空Excel")
 
         print(f"共评估 {len(results)} 条工作计划编号")
+
+        # 调用违规待处理记录API（在写入Excel之前）
+        try:
+            send_violation_records(results)
+        except Exception as e:
+            print(f"发送违规待处理记录时出错: {e}")
 
         # 导出 Excel
         output_dir = os.path.join(BASE_DIR, "output")

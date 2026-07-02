@@ -23,8 +23,9 @@ class ExcelExporter:
 
     # 表头
     HEADERS = [
+        '地市局',
         '作业计划编号',
-        '工作任务',
+        '工作内容',
         '典型基准风险值',
         '作业人员能力风险值',
         '作业环境和时间影响风险值',
@@ -37,7 +38,7 @@ class ExcelExporter:
     ]
 
     # 需要左对齐的列索引（1-based）
-    LEFT_ALIGN_COLS = {4, 5, 9}
+    LEFT_ALIGN_COLS = {5, 6, 10}
 
     def __init__(self, output_dir: str = None):
         self.output_dir = output_dir or os.path.join(os.getcwd(), 'output')
@@ -107,21 +108,29 @@ class ExcelExporter:
             d = detail_map.get(factor)
             return float(d.get('客户填入分值', 0)) if d else 0.0
 
-        # 1. 作业计划编号
-        ws.cell(row=row_num, column=1, value=result.get('作业计划编号', ''))
+        # 1. 地市局
+        ws.cell(row=row_num, column=1, value=result.get('地市局', ''))
 
-        # 2. 工作任务
-        ws.cell(row=row_num, column=2, value=result.get('工作任务', ''))
+        # 2. 作业计划编号
+        ws.cell(row=row_num, column=2, value=result.get('作业计划编号', ''))
 
-        # 3. 典型基准风险值
+        # 3. 工作内容
+        ws.cell(row=row_num, column=3, value=result.get('工作内容', ''))
+
+        # 4. 典型基准风险值（A值）
         benchmark_data = result.get('基准关系', [])
-        benchmark_text = '\n'.join(
-            f"{b.get('benchmark_name', '')}: {b.get('risk_value', 0)}分"
-            for b in benchmark_data if b.get('benchmark_name')
-        )
-        ws.cell(row=row_num, column=3, value=benchmark_text)
+        a_value = result.get('A（基准风险值）', 0)
+        if benchmark_data:
+            benchmark_items = '\n'.join(
+                f"{b.get('benchmark_name', '')}: {b.get('risk_value', 0)}分"
+                for b in benchmark_data if b.get('benchmark_name')
+            )
+            benchmark_text = f"典型基准风险值 = {round(a_value)}分\n{benchmark_items}"
+        else:
+            benchmark_text = '无基准项目'
+        ws.cell(row=row_num, column=4, value=benchmark_text)
 
-        # 4. 作业人员能力风险值 (B)
+        # 5. 作业人员能力风险值 (B)
         b_score = result.get('B（作业人员能力风险值）', 0)
         pg_model = _ds('现场作业负责人（含小组工作负责人）及监护人（含专职监护人）安全意识')
         pg_customer = _dc('现场作业负责人（含小组工作负责人）及监护人（含专职监护人）安全意识')
@@ -140,9 +149,9 @@ class ExcelExporter:
             (f"作业总人数: 【模型评估】{cnt_model}分、【人工评估】{int(cnt_customer)}分\n", int(cnt_model) > int(cnt_customer)),
             (f"负责人的人员性质: 【模型评估】{nat_model}分、【人工评估】{int(nat_customer)}分", int(nat_model) > int(nat_customer)),
         ]
-        ws.cell(row=row_num, column=4, value=self._make_rich_text_opt(b_segments))
+        ws.cell(row=row_num, column=5, value=self._make_rich_text_opt(b_segments))
 
-        # 5. 作业环境和时间影响风险值 (C)
+        # 6. 作业环境和时间影响风险值 (C)
         c_score = result.get('C（作业环境和时间影响风险值）', 0)
         loc_model = _ds('作业地段')
         loc_customer = _dc('作业地段')
@@ -161,32 +170,33 @@ class ExcelExporter:
             (f"天气: 【模型评估】{wea_model}分、【人工评估】{int(wea_customer)}分\n", int(wea_model) > int(wea_customer)),
             (f"作业时段: 【模型评估】{tp_model}分、【人工评估】{int(tp_customer)}分", int(tp_model) > int(tp_customer)),
         ]
-        ws.cell(row=row_num, column=5, value=self._make_rich_text_opt(c_segments))
+        ws.cell(row=row_num, column=6, value=self._make_rich_text_opt(c_segments))
 
-        # 6. 电网、设备风险联动值 (D)
+        # 7. 电网、设备风险联动值 (D)
         d_score = result.get('D（电网、设备风险联动值）', 0)
-        ws.cell(row=row_num, column=6, value=f"总分：{d_score}")
+        ws.cell(row=row_num, column=7, value=f"总分：{d_score}")
 
-        # 7. 总分
+        # 8. 总分（含基准风险值A）
+        a_value = result.get('A（基准风险值）', 0)
         f_score = result.get('F（总风险值）', 0)
-        total_customer = customer_b + customer_c
-        ws.cell(row=row_num, column=7, value=self._make_rich_text_opt([
-            (f"【模型评估】{f_score}分 【人工评估】{total_customer}分", f_score > total_customer),
+        total_customer = int(customer_b + customer_c + a_value)
+        ws.cell(row=row_num, column=8, value=self._make_rich_text_opt([
+            (f"【模型评估】{int(f_score)}分 【人工评估】{total_customer}分", int(f_score) > total_customer),
         ]))
 
-        # 8. 风险等级
+        # 9. 风险等级
         model_level = self.engine.get_risk_level(f_score)
         customer_level = self.engine.get_risk_level(total_customer)
-        ws.cell(row=row_num, column=8, value=f"【模型评估】{model_level} 【人工评估】{customer_level}")
+        ws.cell(row=row_num, column=9, value=f"【模型评估】{model_level} 【人工评估】{customer_level}")
 
-        # 9. 问题描述
-        ws.cell(row=row_num, column=9, value=self._generate_judgment(detailed))
+        # 10. 问题描述
+        ws.cell(row=row_num, column=10, value=self._generate_judgment(detailed))
 
-        # 10. 违章代码
-        ws.cell(row=row_num, column=10, value='D10')
+        # 11. 违章代码
+        ws.cell(row=row_num, column=11, value='D10')
 
-        # 11. 违章条款
-        ws.cell(row=row_num, column=11, value='信息系统的作业信息填报不正确、不规范')
+        # 12. 违章条款
+        ws.cell(row=row_num, column=12, value='信息系统的作业信息填报不正确、不规范')
 
     def _generate_judgment(self, detailed: List[Dict]):
         """生成规则判断结果，返回 CellRichText（模型评估>人工评估的片段标红）"""
@@ -255,7 +265,7 @@ class ExcelExporter:
                         '未知人员性质': '默认得0分',
                     }
                     explanation = nature_explanation.get(evaluation_result, f'对应规则得{rule_score}分')
-                    segments.append((f'规则判断依据：负责人的人员性质为"{evaluation_result}"，根据人员性质评分规则——{explanation}\n', False))
+                    segments.append((f'规则判断依据：作业主体的人员性质为"{evaluation_result}"，根据人员性质评分规则——{explanation}\n', False))
                 elif factor == '作业时段':
                     segments.append((f'规则判断依据：作业时段被判定为"{evaluation_result}"，根据作业时段评分规则得{rule_score}分\n', False))
                 elif evaluation_result:
@@ -286,7 +296,7 @@ class ExcelExporter:
         if '主要工作班成员' in factor:
             return '主要工作班成员安全意识'
         if '负责人的人员性质' in factor:
-            return '负责人的人员性质'
+            return '人员性质'
         return factor
 
     @staticmethod

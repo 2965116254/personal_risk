@@ -12,25 +12,6 @@ os.environ["no_proxy"] = "*"
 os.environ["HTTP_PROXY"] = ""
 os.environ["HTTPS_PROXY"] = ""
 
-# 大模型服务状态标记
-_llm_service_available = None
-_llm_last_check_time = 0
-
-# ====================== 大模型服务可用性检测 ======================
-async def check_llm_service():
-    """检测大模型服务是否可用"""
-    global _llm_service_available, _llm_last_check_time
-    import time
-    
-    # 缓存检测结果，避免频繁检测
-    if time.time() - _llm_last_check_time < 30:
-        return _llm_service_available
-    
-
-    
-    _llm_last_check_time = time.time()
-    return _llm_service_available
-
 # ====================== 工作任务评估 ======================
 async def evaluate_work_task_with_llm(work_task, semaphore, session=None):
     async with semaphore:
@@ -95,7 +76,7 @@ async def evaluate_work_task_with_llm(work_task, semaphore, session=None):
 
 ### 其他高风险作业（需单独加分）
 - 出现“吊装”、“起重”、“吊车” → 大型吊装作业，加 5 分
-- 若同时命中多项，分值累加（但请确保不重复计算同一风险）。
+- 若同时命中多项，分值不累加，仅取最大分值（但请确保不重复计算同一风险）。
 
 ### 输出格式（必须严格遵守）
 请按以下格式输出评估结果（每行一条）：
@@ -186,9 +167,6 @@ async def evaluate_work_location_with_llm(work_content, semaphore, session=None)
             # 作业地段规则
             WORK_LOCATION_RULES = [
                 {'keywords': ['无特殊地段'], 'score': 0, 'description': '无特殊地段'},
-                {'keywords': ['有限空间', '完备', '良好'], 'score': 3, 'description': '有限空间内作业:风、水、电和空气监测设施完备、信号传输良好'},
-                {'keywords': ['有限空间', '不完备', '不良'], 'score': 10, 'description': '有限空间内作业:风、水、电和空气监测设施不完备、信号传输不良'},
-                {'keywords': ['有限空间', '氧气不足', '有毒有害'], 'score': 999, 'description': '有限空间环境当氧气不足或有毒有害气体含量超标时，禁止作业'},
                 {'keywords': ['多回共塔', '带电线路'], 'score': 10, 'description': '作业区段内包含(双)多回共塔带电线路'},
                 {'keywords': ['林区'], 'score': 15, 'description': '林区内作业'},
                 {'keywords': ['地质隐患'], 'score': 15, 'description': '地质隐患区内作业'},
@@ -212,31 +190,23 @@ async def evaluate_work_location_with_llm(work_content, semaphore, session=None)
 临近带电体/共塔线路：
 描述含“共塔”、“多回”、“同塔”、“邻近带电”、“安全距离不足”、“临近高压线”等 → 属于此类。
 
-有限空间内作业：
-描述含“隧道”、“电缆井”、“基坑”、“地下管沟”、“容器内部”、“有限空间”、“密闭空间”等 → 属于此类。
-若上下文有“通风良好”、“监测完备”等描述，条件相对安全；若无此类描述或设施不完备、存在有毒有害气体风险，则按最严重情况处理（10分）。
-
 林区内作业：
 描述含“林区”、“森林”、“树木茂密”、“植被”、“防火林”等 → 属于此类，存在火灾、生物伤害、视线受阻风险。
-地质隐患区内作业：
 
+地质隐患区内作业：
 描述含“地质隐患”、“滑坡”、“塌方”、“泥石流”、“不稳定边坡”、“地面沉降”等 → 属于此类。
+
 特殊跨越/交叉作业：
 描述含“跨越铁路”、“跨越公路”、“跨越航道”、“交叉跨越”、“光缆脱落”、“导线脱落”等，且作业可能导致导、地线、光缆脱落 → 属于此类。
 
-防山火/防风防汛预警期间作业：
-描述含“防山火”、“防风防汛”、“预警”、“山火季节”、“台风”、“大风”等，且在特殊区段作业 → 属于此类。
 综合判断：若同时命中多个类型，取最高分值（不累加，因为地段风险通常以最严重者计）。
 不确定时：若无法明确判断，视为“无特殊区段”，分值为0，并说明理由。
 
 地段类型与分值映射（请从规则中匹配）
 无特殊区段 → 0 分
 临近带电体/共塔线路 → 10 分
-有限空间内作业（无完备通风监测设施或有毒有害） → 10 分
-有限空间内作业（通风监测良好） → 3 分（若提示词统一按最严重处理，则默认 10 分，此处列出备查）
 林区内作业 → 15 分
 地质隐患区内作业 → 15 分
-防山火/防风防汛预警期间作业 → 15 分
 特殊跨越/交叉作业 → 30 分
 
 注意：有限空间作业若未明确说明通风监测良好，一律按 10 分处理，并在输出推断依据中注明“默认按最严重情况（设施不完备/有毒有害）”。
