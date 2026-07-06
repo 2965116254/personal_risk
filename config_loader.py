@@ -152,6 +152,28 @@ def get_query_year_enabled():
     return get_config().get('query_year_enabled', False)
 
 
+def get_query_year_start_date():
+    """根据 query_year 配置获取查询开始日期"""
+    cfg = get_config()
+    if not cfg.get('query_year_enabled', False):
+        return None
+    year = cfg.get('query_year')
+    month = cfg.get('query_start_month', 1)
+    day = cfg.get('query_start_day', 1)
+    return f"{year}-{int(month):02d}-{int(day):02d}"
+
+
+def get_query_year_end_date():
+    """根据 query_year 配置获取查询结束日期"""
+    cfg = get_config()
+    if not cfg.get('query_year_enabled', False):
+        return None
+    year = cfg.get('query_year')
+    month = cfg.get('query_end_month', 12)
+    day = cfg.get('query_end_day', 31)
+    return f"{year}-{int(month):02d}-{int(day):02d}"
+
+
 def get_start_date():
     """获取查询开始日期（支持动态计算）"""
     import datetime

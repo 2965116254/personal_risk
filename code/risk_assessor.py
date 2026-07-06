@@ -45,31 +45,57 @@ class RiskAssessor:
         self.db_config = db_config
         self.fetcher = DataFetcher(db_config)
         self.engine = RiskRuleEngine()
+        self._user_name_map: Dict[str, str] = {}
 
     # ==================== 主评估流程 ====================
 
-    def assess(self, limit: int = None, cutoff_date: str = None, start_date: str = None, end_date: str = None,
+    def assess(self, limit: int = None, query_start_date: str = None, query_end_date: str = None,
                use_cache: bool = True, work_codes: List[str] = None,
                incremental_output: bool = False) -> List[Dict]:
         """执行风险评估主流程，返回评估结果列表
-        :param work_codes: 若指定，则按作业计划编号列表查询，忽略 limit/cutoff_date/start_date/end_date
+        :param work_codes: 若指定，则按作业计划编号列表查询，忽略 limit/query_start_date/query_end_date
         :param incremental_output: 是否只返回增量数据（跳过缓存中已存在的工作票），用于 Excel 增量输出
         """
         self.fetcher.connect()
         cache = DataCache()
         try:
-            # 1. 查询操作票
+            # ==================== 1. 两阶段查询优化 ====================
+            # 增量模式 + 启用缓存 → 先轻量查 work_code 列表，对比缓存后只查新增的完整数据
             if work_codes:
+                # 指定 work_codes：直接查完整数据
                 work_tickets = self.fetcher.fetch_work_tickets_by_codes(work_codes)
+            elif use_cache and incremental_output:
+                # 阶段1: 轻量查询 work_code 列表（仅1列，不关联工作票表）
+                all_work_codes = self.fetcher.fetch_work_codes(query_start_date, query_end_date)
+                if not all_work_codes:
+                    print("没有找到任何工作计划编号")
+                    return []
+                print(f"查询到 {len(all_work_codes)} 条工作计划编号")
+
+                # 加载缓存中的 work_code 集合（只读key，轻量）
+                cached_codes = cache.get_all_cached_work_codes()
+                # 找出新增的 work_code
+                new_codes = [wc for wc in all_work_codes if wc not in cached_codes]
+
+                if not new_codes:
+                    print(f"所有 {len(all_work_codes)} 条均已缓存（增量模式），跳过处理")
+                    return []
+
+                print(f"缓存命中 {len(all_work_codes) - len(new_codes)} 条，新增 {len(new_codes)} 条")
+                # 阶段2: 只查新增的完整数据
+                work_tickets = self.fetcher.fetch_work_tickets_by_codes(new_codes)
             else:
-                work_tickets = self.fetcher.fetch_work_tickets(limit, cutoff_date, start_date, end_date)
+                # 非增量模式：全量查询（预计算等场景）
+                work_tickets = self.fetcher.fetch_work_tickets(limit, query_start_date, query_end_date)
+
             if not work_tickets:
                 print("没有找到任何工作计划编号")
                 return []
 
-            print(f"找到 {len(work_tickets)} 条工作计划编号")
+            print(f"获取到 {len(work_tickets)} 条工作计划编号")
 
             # 2. 增量对比：找出需要大模型评估的新票
+            # 注意：增量模式下 work_tickets 已全是新增，find_new_tickets 会全部返回为新增
             new_tickets = work_tickets
             cached_llm = {}  # {work_code: {llm_result, llm_location, llm_location_type}}
             if use_cache:
@@ -83,6 +109,9 @@ class RiskAssessor:
 
             # 4. 查询违章记录
             peccancy_dict = self.fetcher.fetch_peccancy_records(all_user_ids)
+
+            # 4.1 查询用户ID对应的姓名映射（用于Excel中ID→姓名转换）
+            self._user_name_map = self.fetcher.fetch_user_name_map(all_user_ids)
 
             # 5. 加载人员ID类型缓存（全量加载，user_id_types 体积小无需过滤）
             user_id_type_cache = cache.load_all_user_id_types() if use_cache else {}
@@ -139,6 +168,11 @@ class RiskAssessor:
             dynamic_risk_dict = self.fetcher.fetch_dynamic_risk_scores(list(work_codes))
             print(f"[耗时] 查询动态风险分值: {time.time() - t0:.1f}s, 获取 {len(dynamic_risk_dict)} 条")
 
+            # 10.1 批量查询电网、设备风险维度（DIMENSION_TYPE = '3.00'）的人工评估分值
+            t0 = time.time()
+            dynamic_risk_d_dict = self.fetcher.fetch_dynamic_risk_scores_d(list(work_codes))
+            print(f"[耗时] 查询电网设备风险分值: {time.time() - t0:.1f}s, 获取 {len(dynamic_risk_d_dict)} 条")
+
             # 11. 批量查询基准关系
             t0 = time.time()
             benchmark_dict = self.fetcher.fetch_benchmark_relations(list(work_codes), work_plan_details)
@@ -151,7 +185,7 @@ class RiskAssessor:
                 result = self._calc_single_ticket(
                     ticket, idx, peccancy_dict, hot_work_dict,
                     llm_results, loc_results, lt_results,
-                    work_plan_details, dynamic_risk_dict, benchmark_dict,
+                    work_plan_details, dynamic_risk_dict, dynamic_risk_d_dict, benchmark_dict,
                 )
                 results.append(result)
             print(f"[耗时] 逐张计算风险值: {time.time() - t0:.1f}s, 共 {len(results)} 条")
@@ -198,7 +232,7 @@ class RiskAssessor:
         self, ticket: Dict, ticket_idx: int,
         peccancy_dict: Dict, hot_work_dict: Dict,
         llm_results: Dict, llm_location_results: Dict, llm_location_type_results: Dict,
-        work_plan_details: Dict, dynamic_risk_dict: Dict, benchmark_dict: Dict,
+        work_plan_details: Dict, dynamic_risk_dict: Dict, dynamic_risk_d_dict: Dict, benchmark_dict: Dict,
     ) -> Dict:
         """计算单张工作票的风险值"""
         work_code = ticket.get('work_code', '')
@@ -247,8 +281,9 @@ class RiskAssessor:
         work_time_period_score = self.engine.calc_work_time_period_score(work_time_period)
         C += work_time_period_score
 
-        # D: 电网、设备风险联动值（暂不计算）
-        D = 0
+        # D: 电网、设备风险联动值（从数据库 DIMENSION_TYPE='3.00' 的人工评估中获取）
+        d_items = dynamic_risk_d_dict.get(work_code, [])
+        D = sum(item.get('风险值得分', 0) for item in d_items)
 
         # A: 基准风险值（典型基准风险值）
         # 输电风险值A = Amax * an
@@ -302,8 +337,83 @@ class RiskAssessor:
             'B（作业人员能力风险值）': B,
             'C（作业环境和时间影响风险值）': C,
             'D（电网、设备风险联动值）': D,
+            'D_items': d_items,
             'F（总风险值）': F,
             '详细评估结果': detailed_results,
+            '查询数据': self._build_query_data(ticket, peccancy_dict),
+        }
+
+    # ==================== 查询数据构建 ====================
+
+    def _build_query_data(self, ticket: Dict, peccancy_dict: Dict) -> Dict:
+        """构建查询数据工作表所需的原始数据库字段"""
+
+        def _fmt_viol(uid):
+            """格式化单个人员的违章记录"""
+            if not uid:
+                return ''
+            viol = peccancy_dict.get(uid, {})
+            if not viol:
+                return '无违章'
+            return ','.join(f'{k}类{viol[k]}次' for k in viol)
+
+        def _fmt_members(uids_str):
+            """格式化班组成员姓名列表"""
+            if not uids_str:
+                return ''
+            uids = [u.strip() for u in uids_str.split(',') if u.strip()]
+            names = []
+            for uid in uids:
+                parts = self.engine.split_member_ids(uid)
+                if not parts:
+                    parts = [uid]
+                for part in parts:
+                    display = self.engine.clean_bracket_content(part) or part
+                    if not self.engine.contains_chinese(display):
+                        resolved = self._user_name_map.get(part, '') or self._user_name_map.get(display, '')
+                        if resolved:
+                            display = resolved
+                    names.append(display)
+            return '、'.join(names)
+
+        def _fmt_members_viol(uids_str):
+            """格式化班组成员的违章记录"""
+            if not uids_str:
+                return ''
+            uids = [u.strip() for u in uids_str.split(',') if u.strip()]
+            viols = []
+            for uid in uids:
+                parts = self.engine.split_member_ids(uid)
+                if not parts:
+                    parts = [uid]
+                for part in parts:
+                    viol = peccancy_dict.get(part, {})
+                    if not viol:
+                        viols.append('无违章')
+                    else:
+                        viols.append(','.join(f'{k}类{viol[k]}次' for k in viol))
+            return '；'.join(viols)
+
+        def _fmt_name(uid, uname):
+            """格式化单个人员姓名"""
+            if uname:
+                return uname
+            if uid:
+                return self._user_name_map.get(uid, uid)
+            return ''
+
+        return {
+            '地市局': self.BUREAU_MAP.get(ticket.get('bureau_code', ''), ''),
+            '作业计划编号': ticket.get('work_code', ''),
+            '作业人数': ticket.get('work_member_count', ''),
+            '负责人': _fmt_name(ticket.get('work_principal_uid', ''), ticket.get('work_principal_uname', '')),
+            '负责人违章': _fmt_viol(ticket.get('work_principal_uid', '')),
+            '班组成员': _fmt_members(ticket.get('work_member_uid', '')),
+            '班组成员违章': _fmt_members_viol(ticket.get('work_member_uid', '')),
+            '监护人': _fmt_name(ticket.get('guardian_uid', ''), ticket.get('guardian_uname', '')),
+            '监护人违章': _fmt_viol(ticket.get('guardian_uid', '')),
+            '工作内容': ticket.get('work_content', ''),
+            '工作任务': ticket.get('work_task', ''),
         }
 
     # ==================== B 值子计算 ====================
@@ -497,6 +607,11 @@ class RiskAssessor:
                     parts = [mid.strip()]
                 for part in parts:
                     display = self.engine.clean_bracket_content(part) or part
+                    # 若display为纯ID（不含中文），尝试从姓名映射中解析为真实姓名
+                    if not self.engine.contains_chinese(display):
+                        resolved_name = self._user_name_map.get(part, '') or self._user_name_map.get(display, '')
+                        if resolved_name:
+                            display = resolved_name
                     viol = peccancy_dict.get(part, {})
                     viol_desc = '无违章' if not viol else ','.join([f'{k}类{viol[k]}次' for k in viol])
                     member_parts.append(f"工作班成员【{display}】{'存在' if viol else ''}{viol_desc}")

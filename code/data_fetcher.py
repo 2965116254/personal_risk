@@ -97,13 +97,12 @@ class DataFetcher:
 
     # ==================== 操作票查询 ====================
 
-    def fetch_work_tickets(self, limit: int = None, cutoff_date: str = None,
-                          start_date: str = None, end_date: str = None) -> List[Dict]:
+    def fetch_work_tickets(self, limit: int = None, query_start_date: str = None,
+                          query_end_date: str = None) -> List[Dict]:
         """
         查询操作票数据（以 sp_ss_rc_work_plan 为主表）
-        :param cutoff_date: 排除 plan_end_time <= cutoff_date 的记录
-        :param start_date: plan_start_time >= start_date
-        :param end_date:   plan_start_time <= end_date
+        :param query_start_date: 查询时间区间开始，用于区间重叠判断 NOT(plan_end_time <= query_start_date)
+        :param query_end_date:   查询时间区间结束，用于区间重叠判断 NOT(plan_start_time >= query_end_date)
         """
         query = """
         SELECT 
@@ -141,22 +140,37 @@ class DataFetcher:
             WHERE rn = 1
         ) re ON wp.work_code = re.business_name
         LEFT JOIN sp_pd_wticket_base wb ON re.wticket_id = wb.id
-        WHERE (wp.task_state != '1.0' OR wp.task_state IS NULL)
+        WHERE wp.task_state IN ('2.0', '3.0', '6.0')
         """
         params = []
-        if cutoff_date:
-            query += " AND NOT(wp.plan_end_time <= %s)"
-            params.append(cutoff_date + " 00:00:00")
-        if start_date:
-            query += " AND wp.plan_start_time >= %s"
-            params.append(start_date)
-        if end_date:
-            query += " AND wp.plan_start_time <= %s"
-            params.append(end_date)
+        if query_start_date and query_end_date:
+            query += " AND ( NOT(wp.plan_end_time <= %s OR wp.plan_start_time >= %s) )"
+            params.append(query_start_date + " 00:00:00")
+            params.append(query_end_date + " 23:59:59")
         if limit is not None:
             query += " LIMIT %s"
             params.append(limit)
         return self.fetchall(query, params)
+
+    def fetch_work_codes(self, query_start_date: str = None, query_end_date: str = None) -> List[str]:
+        """
+        轻量查询：只返回满足时间条件的 work_code 列表（不关联工作票表，速度快）
+        :param query_start_date: 查询时间区间开始
+        :param query_end_date: 查询时间区间结束
+        :return: work_code 字符串列表
+        """
+        query = """
+        SELECT wp.work_code
+        FROM sp_ss_rc_work_plan wp
+        WHERE wp.task_state IN ('2.0', '3.0', '6.0')
+        """
+        params = []
+        if query_start_date and query_end_date:
+            query += " AND ( NOT(wp.plan_end_time <= %s OR wp.plan_start_time >= %s) )"
+            params.append(query_start_date + " 00:00:00")
+            params.append(query_end_date + " 23:59:59")
+        rows = self.fetchall(query, params)
+        return [row['work_code'] for row in rows]
 
     def fetch_work_tickets_by_codes(self, work_codes: List[str]) -> List[Dict]:
         """
@@ -234,6 +248,32 @@ class DataFetcher:
                 peccancy_dict[user_key][vtype] = peccancy_dict[user_key].get(vtype, 0) + r['count']
         return peccancy_dict
 
+    # ==================== 用户姓名映射查询 ====================
+
+    def fetch_user_name_map(self, user_ids: List[str]) -> Dict[str, str]:
+        """
+        批量查询用户ID对应的姓名（从违章记录表获取）
+        :param user_ids: 用户ID列表
+        :return: {peccancy_uid: peccancy_uname}
+        """
+        if not user_ids:
+            return {}
+        query = """
+        SELECT peccancy_uid, peccancy_uname
+        FROM sp_ss_uq_peccancy_list_log
+        WHERE peccancy_uid IN ({placeholders})
+        AND peccancy_uname IS NOT NULL AND peccancy_uname != ''
+        GROUP BY peccancy_uid, peccancy_uname
+        """
+        records = self._batch_query(query, user_ids)
+        # 如果一个uid有多条记录取第一条的uname
+        result = {}
+        for r in records:
+            uid = r['peccancy_uid']
+            if uid not in result:
+                result[uid] = r['peccancy_uname']
+        return result
+
     # ==================== 动火作业票查询 ====================
 
     def fetch_hot_work_tickets(self, work_codes: List[str]) -> Dict[str, str]:
@@ -294,6 +334,35 @@ class DataFetcher:
             if wc not in result:
                 result[wc] = {}
             result[wc][r['ASSESS_FACTOR']] = float(r['CUSTOMER_SCORE']) if r['CUSTOMER_SCORE'] else 0.0
+        return result
+
+    # ==================== 电网、设备风险维度查询（DIMENSION_TYPE = '3.00'） ====================
+
+    def fetch_dynamic_risk_scores_d(self, work_codes: List[str]) -> Dict[str, List[Dict]]:
+        """
+        批量查询电网、设备风险维度（DIMENSION_TYPE = '3.00'）的人工评估分值
+        :return: {work_code: [{评估因子, 评估结果项, 风险值得分}, ...]}
+        """
+        if not work_codes:
+            return {}
+        query = """
+        SELECT A.WORK_CODE, B.ITEM_NAME AS ASSESS_FACTOR, 
+               B.ASSESS_RESULT AS ASSESS_RESULT, B.ASSESS_VALUE AS CUSTOMER_SCORE
+        FROM sp_ss_rc_work_plan A
+        LEFT JOIN sp_ss_rc_dynamic_risk_assess B ON A.ID = B.WORK_PLAN_ID
+        WHERE A.WORK_CODE IN ({placeholders}) AND B.DIMENSION_TYPE = '3.00'
+        """
+        records = self._batch_query(query, work_codes)
+        result = {}
+        for r in records:
+            wc = r['WORK_CODE']
+            if wc not in result:
+                result[wc] = []
+            result[wc].append({
+                '评估因子': r['ASSESS_FACTOR'] or '',
+                '评估结果项': r['ASSESS_RESULT'] or '',
+                '风险值得分': float(r['CUSTOMER_SCORE']) if r['CUSTOMER_SCORE'] else 0.0,
+            })
         return result
 
     # ==================== 基准关系查询 ====================

@@ -37,6 +37,21 @@ class ExcelExporter:
         '违章条款',
     ]
 
+    # 查询数据工作表表头
+    QUERY_HEADERS = [
+        '地市局',
+        '作业计划编号',
+        '作业人数',
+        '负责人',
+        '负责人违章',
+        '班组成员',
+        '班组成员违章',
+        '监护人',
+        '监护人违章',
+        '工作内容',
+        '工作任务',
+    ]
+
     # 需要左对齐的列索引（1-based）
     LEFT_ALIGN_COLS = {5, 6, 10}
 
@@ -83,6 +98,9 @@ class ExcelExporter:
 
         # 美化（合并遍历，含列宽采样优化）
         self._beautify(ws, len(filtered_results))
+
+        # 写入查询数据工作表（使用全量数据，不过滤）
+        self._write_query_data_sheet(wb, results)
 
         # 保存
         wb.save(filepath)
@@ -174,12 +192,19 @@ class ExcelExporter:
 
         # 7. 电网、设备风险联动值 (D)
         d_score = result.get('D（电网、设备风险联动值）', 0)
-        ws.cell(row=row_num, column=7, value=f"总分：{d_score}")
+        d_items = result.get('D_items', [])
+        if d_items:
+            d_lines = [f"电网、设备风险联动值 = 总分（{int(d_score)}分）"]
+            for item in d_items:
+                d_lines.append(f"{item.get('评估因子', '')}：{int(item.get('风险值得分', 0))}分")
+            ws.cell(row=row_num, column=7, value='\n'.join(d_lines))
+        else:
+            ws.cell(row=row_num, column=7, value=f"总分：{int(d_score)}")
 
         # 8. 总分（含基准风险值A）
         a_value = result.get('A（基准风险值）', 0)
         f_score = result.get('F（总风险值）', 0)
-        total_customer = int(customer_b + customer_c + a_value)
+        total_customer = int(customer_b + customer_c + a_value + d_score)
         ws.cell(row=row_num, column=8, value=self._make_rich_text_opt([
             (f"【模型评估】{int(f_score)}分 【人工评估】{total_customer}分", int(f_score) > total_customer),
         ]))
@@ -405,5 +430,64 @@ class ExcelExporter:
         for col_idx, width in enumerate(col_widths[1:], 1):
             col_letter = ws.cell(row=1, column=col_idx).column_letter
             ws.column_dimensions[col_letter].width = min(max(width + 2, 12), 50)
+
+        ws.freeze_panes = 'A2'
+
+    # ==================== 查询数据工作表 ====================
+
+    def _write_query_data_sheet(self, wb, results):
+        """写入查询数据工作表"""
+        ws = wb.create_sheet('查询数据')
+
+        # 写入表头
+        for col, header in enumerate(self.QUERY_HEADERS, 1):
+            ws.cell(row=1, column=col, value=header)
+
+        # 写入数据
+        row_num = 2
+        for result in results:
+            query_data = result.get('查询数据', {})
+            if not query_data:
+                continue
+            for col, header in enumerate(self.QUERY_HEADERS, 1):
+                value = query_data.get(header, '')
+                if value is None:
+                    value = ''
+                ws.cell(row=row_num, column=col, value=value)
+            row_num += 1
+
+        # 美化
+        self._beautify_query_sheet(ws, row_num - 1)
+
+    def _beautify_query_sheet(self, ws, row_count):
+        """美化查询数据工作表"""
+        header_fill = PatternFill(start_color='4472C4', end_color='4472C4', fill_type='solid')
+        header_font = Font(color='FFFFFF', bold=True, name='微软雅黑')
+        content_font = Font(name='微软雅黑', size=10)
+        thin_border = Border(
+            left=Side(style='thin'), right=Side(style='thin'),
+            top=Side(style='thin'), bottom=Side(style='thin'),
+        )
+        center_align = Alignment(horizontal='center', vertical='center', wrap_text=True)
+        left_align = Alignment(horizontal='left', vertical='center', wrap_text=True)
+        # 需要左对齐的列（工作内容、工作任务等文本列）
+        query_left_align_cols = {6, 7, 10, 11}
+
+        for row in ws.iter_rows():
+            for cell in row:
+                cell.border = thin_border
+                if cell.row == 1:
+                    cell.fill = header_fill
+                    cell.font = header_font
+                    cell.alignment = center_align
+                else:
+                    cell.font = content_font
+                    cell.alignment = left_align if cell.column in query_left_align_cols else center_align
+
+        # 设置列宽
+        col_widths = [18, 22, 10, 12, 14, 18, 18, 12, 14, 30, 30]
+        for col_idx, width in enumerate(col_widths, 1):
+            col_letter = ws.cell(row=1, column=col_idx).column_letter
+            ws.column_dimensions[col_letter].width = width
 
         ws.freeze_panes = 'A2'

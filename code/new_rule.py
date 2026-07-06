@@ -54,13 +54,13 @@ def run_daily_precalculation():
         db_config = config_loader.get_db_new_config()
 
         # 查询参数（复用共享函数）
-        limit, cutoff_date, start_date, end_date = get_query_params()
+        limit, query_start_date, query_end_date = get_query_params()
 
-        print(f"查询参数: limit={limit}, 时间过滤: 排除plan_end_time<={cutoff_date} | plan_start_time范围: {start_date} ~ {end_date}")
+        print(f"查询参数: limit={limit}, 时间过滤: 查询时间区间 {query_start_date} ~ {query_end_date}（区间重叠判断）")
 
         # 执行完整评估（含大模型），DataCache 自动保存 LLM 结果到 processed_*.json
         assessor = RiskAssessor(db_config)
-        results = assessor.assess(limit=limit, cutoff_date=cutoff_date, start_date=start_date, end_date=end_date)
+        results = assessor.assess(limit=limit, query_start_date=query_start_date, query_end_date=query_end_date)
 
         if not results:
             print("预计算未获取到数据")

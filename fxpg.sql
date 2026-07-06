@@ -123,11 +123,27 @@ SELECT
       wb.guardian_uid,          -- 专责监护人ID
       wb.guardian_uname,        -- 专责监护人姓名
       wb.work_member_count,     -- 工作班人员总数
+      wb.work_principal_oname,
+      CASE task_state
+          WHEN '1.0' THEN '新建'
+          WHEN '2.0' THEN '未开工'
+          WHEN '3.0' THEN '进行中'
+          WHEN '4.0' THEN '已完成'
+          WHEN '5.0' THEN '取消'
+          WHEN '6.0' THEN '间断'
+          WHEN '7.0' THEN '改期'
+          ELSE ''
+      END AS `任务状态`,
+      CASE wb.whether_outer_dept
+          WHEN '1' THEN '外单位'
+          WHEN '2.0' THEN '本单位'
+          ELSE ''
+      END AS `工作票-外来单位`,
       CASE wp.task_main
           WHEN '1.0' THEN '本单位'
           WHEN '2.0' THEN '分包作业'
           ELSE ''
-      END AS `作业主体`,
+      END AS `作业计划-作业主体`,
       wb.work_task              -- 工作任务
   FROM sp_ss_rc_work_plan wp
   LEFT JOIN (
@@ -140,5 +156,12 @@ SELECT
       WHERE rn = 1
   ) re ON wp.work_code = re.business_name
   LEFT JOIN sp_pd_wticket_base wb ON re.wticket_id = wb.id
-WHERE 1=1 and ( NOT(wp.plan_end_time <= '2026-05-01 00:00:00')
-                                OR wp.plan_start_time >= '2026-05-31 23:59:59' )
+WHERE 1=1 
+  AND ( NOT(wp.plan_end_time <= '计划结束时间' OR wp.plan_start_time >= '计划开始时间') ) 
+  AND wp.task_state IN ('2.0', '3.0', '6.0')
+
+
+SELECT 
+    work_principal_oname
+FROM sp_pd_wticket_base
+WHERE whether_outer_dept LIKE '%1%'

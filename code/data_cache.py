@@ -65,8 +65,29 @@ class DataCache:
         return all_cache
 
     def get_processed_work_codes(self) -> Set[str]:
-        """获取所有已处理过的 work_code 集合"""
+        """获取所有已处理的 work_code 集合（加载完整记录，较重量）"""
         return set(self.load_all_cache().keys())
+
+    def get_all_cached_work_codes(self) -> Set[str]:
+        """
+        获取所有已缓存的 work_code 集合（只读key，不加载完整数据，轻量）
+        :return: 已缓存的 work_code 集合
+        """
+        all_codes = set()
+        for filepath in self._get_all_cache_files():
+            try:
+                with open(filepath, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+                records = data.get("records", {})
+                all_codes.update(records.keys())
+            except (json.JSONDecodeError, KeyError, IOError) as e:
+                print(f"警告: 读取缓存文件 {filepath} 失败: {e}，将自动删除该损坏文件")
+                try:
+                    os.remove(filepath)
+                except OSError:
+                    pass
+        print(f"已加载缓存中的 {len(all_codes)} 个 work_code")
+        return all_codes
 
     def load_all_user_id_types(self, filter_user_ids: Set[str] = None) -> Dict[str, bool]:
         """

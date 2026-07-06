@@ -136,6 +136,15 @@ def send_violation_records(results):
             continue
 
         detailed = result.get('详细评估结果', [])
+
+        # 只发送模型分值 > 人工分值的记录（无差异或模型分值更低的不发送）
+        has_model_gt_manual = any(
+            d.get('风险值得分', 0) > d.get('客户填入分值', 0)
+            for d in detailed
+        )
+        if not has_model_gt_manual:
+            continue
+
         description = _build_violation_description(detailed)
 
         payload.append({
@@ -202,28 +211,22 @@ def send_file_via_elink(file_path, touser_id=None, message_type=None):
 # ==================== 主流程 ====================
 
 def get_query_params():
-    """获取查询参数（limit、cutoff_date、start_date、end_date），供 run_risk_calculation 和 run_daily_precalculation 共用
-    :return: (limit, cutoff_date, start_date, end_date)
-        - cutoff_date: 排除 plan_end_time <= cutoff_date 的记录（由 query_time_range 控制）
-        - start_date/end_date: plan_start_time 范围过滤（由 query_year 控制）
+    """获取查询参数（limit、query_start_date、query_end_date），供 run_risk_calculation 和 run_daily_precalculation 共用
+    :return: (limit, query_start_date, query_end_date)
+        - query_start_date/query_end_date: 查询时间区间，用于区间重叠判断 NOT(plan_end_time <= start OR plan_start_time >= end)
     """
-    config = config_loader.get_config()
-
     limit = config_loader.get_query_limit()
 
-    # 截止时间：排除已结束的计划（NOT(plan_end_time <= cutoff_date)）
-    cutoff_date = None
-    if config_loader.get_query_time_range_enabled():
-        cutoff_date = config_loader.get_start_date()
-
-    # 计划开始时间范围
-    start_date, end_date = None, None
+    # 查询时间区间：优先 query_year 配置，其次 query_time_range
+    query_start_date, query_end_date = None, None
     if config_loader.get_query_year_enabled():
-        yr = config.get('query_year', 2025)
-        start_date = f"{yr}-{config.get('query_start_month', 1):02d}-{config.get('query_start_day', 1):02d}"
-        end_date = f"{yr}-{config.get('query_end_month', 12):02d}-{config.get('query_end_day', 31):02d}"
+        query_start_date = config_loader.get_query_year_start_date()
+        query_end_date = config_loader.get_query_year_end_date()
+    elif config_loader.get_query_time_range_enabled():
+        query_start_date = config_loader.get_start_date()
+        query_end_date = config_loader.get_end_date()
 
-    return limit, cutoff_date, start_date, end_date
+    return limit, query_start_date, query_end_date
 
 
 def run_risk_calculation():
@@ -236,10 +239,10 @@ def run_risk_calculation():
         db_config = config_loader.get_db_new_config()
 
         # 查询参数
-        limit, cutoff_date, start_date, end_date = get_query_params()
+        limit, query_start_date, query_end_date = get_query_params()
 
         print(f"测试模式: {config.get('test_mode', False)}, 限制记录数: {limit}")
-        print(f"时间过滤: 排除plan_end_time<={cutoff_date} | plan_start_time范围: {start_date} ~ {end_date}")
+        print(f"时间过滤: 查询时间区间 {query_start_date} ~ {query_end_date}（区间重叠判断）")
 
         # 特定计划编号测试模式
         work_codes = None
@@ -250,7 +253,7 @@ def run_risk_calculation():
 
         # 执行风险评估
         assessor = RiskAssessor(db_config)
-        results = assessor.assess(limit=limit, cutoff_date=cutoff_date, start_date=start_date, end_date=end_date,
+        results = assessor.assess(limit=limit, query_start_date=query_start_date, query_end_date=query_end_date,
                                   incremental_output=True, work_codes=work_codes)
 
         if not results:
