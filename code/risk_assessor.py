@@ -178,6 +178,22 @@ class RiskAssessor:
             benchmark_dict = self.fetcher.fetch_benchmark_relations(list(work_codes), work_plan_details)
             print(f"[耗时] 查询基准关系: {time.time() - t0:.1f}s, 获取 {len(benchmark_dict)} 条")
 
+            # 11.1 批量查询班组成员变更记录
+            t0 = time.time()
+            change_member_dict = self.fetcher.fetch_change_members(list(work_codes))
+            if change_member_dict:
+                print(f"[耗时] 查询变更记录: {time.time() - t0:.1f}s, "
+                      f"{sum(len(v) for v in change_member_dict.values())} 条变更记录")
+            else:
+                print(f"[耗时] 查询变更记录: {time.time() - t0:.1f}s, 无变更记录")
+
+            # 11.2 大模型解析变更内容 + 查询新增人员的违章记录
+            change_info = {}  # {work_code: {added_names, removed_names, added_peccancy, member_adjustment}}
+            if change_member_dict:
+                change_info = self._process_change_members(
+                    change_member_dict, peccancy_dict,
+                )
+
             # 12. 逐张计算风险值
             t0 = time.time()
             results = []
@@ -186,6 +202,8 @@ class RiskAssessor:
                     ticket, idx, peccancy_dict, hot_work_dict,
                     llm_results, loc_results, lt_results,
                     work_plan_details, dynamic_risk_dict, dynamic_risk_d_dict, benchmark_dict,
+                    change_member_dict=change_member_dict,
+                    change_info=change_info,
                 )
                 results.append(result)
             print(f"[耗时] 逐张计算风险值: {time.time() - t0:.1f}s, 共 {len(results)} 条")
@@ -233,6 +251,7 @@ class RiskAssessor:
         peccancy_dict: Dict, hot_work_dict: Dict,
         llm_results: Dict, llm_location_results: Dict, llm_location_type_results: Dict,
         work_plan_details: Dict, dynamic_risk_dict: Dict, dynamic_risk_d_dict: Dict, benchmark_dict: Dict,
+        change_member_dict: Dict = None, change_info: Dict = None,
     ) -> Dict:
         """计算单张工作票的风险值"""
         work_code = ticket.get('work_code', '')
@@ -259,7 +278,11 @@ class RiskAssessor:
         B += work_count_score
 
         # B4: 负责人的人员性质
-        principal_nature, principal_nature_score = self.engine.calc_personnel_nature(ticket.get('task_main'))
+        principal_nature, principal_nature_score = self.engine.calc_personnel_nature(
+            ticket.get('task_main'),
+            ticket.get('whether_outer_dept'),
+            ticket.get('work_principal_oname'),
+        )
         B += principal_nature_score
 
         # --- C: 作业环境和时间影响风险值 ---
@@ -312,6 +335,11 @@ class RiskAssessor:
         # F: 总风险值（含基准风险值A）
         F = B + C + D + A
 
+        # 变更成员信息（先提取，用于传递给 _build_detailed_results）
+        change_info_for_ticket = (change_info or {}).get(work_code, {})
+        # 计算调整后人数
+        original_count = ticket.get('work_member_count')
+
         # --- 生成详细评估结果 ---
         detailed_results = self._build_detailed_results(
             ticket, ticket_key, work_code, customer_scores,
@@ -322,6 +350,7 @@ class RiskAssessor:
             work_time_period, work_time_period_score,
             llm_results, llm_location_results,
             work_plan, A, A_details,
+            change_info=change_info_for_ticket,
         )
 
         bureau_code = ticket.get('bureau_code', '')
@@ -340,12 +369,14 @@ class RiskAssessor:
             'D_items': d_items,
             'F（总风险值）': F,
             '详细评估结果': detailed_results,
-            '查询数据': self._build_query_data(ticket, peccancy_dict),
+            '查询数据': self._build_query_data(ticket, peccancy_dict, work_code, change_info),
+            '变更成员': change_info_for_ticket,
         }
 
     # ==================== 查询数据构建 ====================
 
-    def _build_query_data(self, ticket: Dict, peccancy_dict: Dict) -> Dict:
+    def _build_query_data(self, ticket: Dict, peccancy_dict: Dict,
+                          work_code: str = None, change_info: Dict = None) -> Dict:
         """构建查询数据工作表所需的原始数据库字段"""
 
         def _fmt_viol(uid):
@@ -356,6 +387,44 @@ class RiskAssessor:
             if not viol:
                 return '无违章'
             return ','.join(f'{k}类{viol[k]}次' for k in viol)
+
+        def _build_member_name_map(uids_str, unames_str):
+            """构建 uid -> uname 的映射（按位置对应）"""
+            if not uids_str:
+                return {}
+            uid_parts = []
+            for uid in uids_str.split(','):
+                uid = uid.strip()
+                if not uid:
+                    continue
+                sub_parts = self.engine.split_member_ids(uid)
+                if sub_parts:
+                    uid_parts.extend(sub_parts)
+                else:
+                    uid_parts.append(uid)
+
+            uname_parts = []
+            if unames_str:
+                for uname in unames_str.split(','):
+                    uname = uname.strip()
+                    if not uname:
+                        continue
+                    sub_parts = self.engine.split_member_ids(uname)
+                    if sub_parts:
+                        uname_parts.extend(sub_parts)
+                    else:
+                        uname_parts.append(uname)
+
+            name_map = {}
+            for i, uid in enumerate(uid_parts):
+                if i < len(uname_parts) and uname_parts[i]:
+                    name_map[uid] = uname_parts[i]
+            return name_map
+
+        member_name_map = _build_member_name_map(
+            ticket.get('work_member_uid', ''),
+            ticket.get('work_member_uname', '')
+        )
 
         def _fmt_members(uids_str):
             """格式化班组成员姓名列表"""
@@ -370,7 +439,10 @@ class RiskAssessor:
                 for part in parts:
                     display = self.engine.clean_bracket_content(part) or part
                     if not self.engine.contains_chinese(display):
-                        resolved = self._user_name_map.get(part, '') or self._user_name_map.get(display, '')
+                        resolved = (member_name_map.get(part, '') or
+                                    self._user_name_map.get(part, '') or
+                                    member_name_map.get(display, '') or
+                                    self._user_name_map.get(display, ''))
                         if resolved:
                             display = resolved
                     names.append(display)
@@ -402,6 +474,27 @@ class RiskAssessor:
                 return self._user_name_map.get(uid, uid)
             return ''
 
+        # 变更成员信息
+        cinfo = (change_info or {}).get(work_code or ticket.get('work_code', ''), {})
+        change_member_text = ''
+        if cinfo.get('added_names') or cinfo.get('removed_names'):
+            parts = []
+            if cinfo.get('added_names'):
+                for n in cinfo['added_names']:
+                    parts.append(f"新增：{n}")
+            if cinfo.get('removed_names'):
+                for n in cinfo['removed_names']:
+                    parts.append(f"退出：{n}")
+            change_member_text = '，'.join(parts)
+
+        # 新增人员违章记录
+        added_peccancy_text = ''
+        if cinfo.get('added_peccancy'):
+            added_peccancy_text = '；'.join(
+                f"{n}: {','.join(f'{k}类{v[k]}次' for k in v)}"
+                for n, v in cinfo['added_peccancy'].items()
+            ) if any(cinfo['added_peccancy'].values()) else '新增人员无违章'
+
         return {
             '地市局': self.BUREAU_MAP.get(ticket.get('bureau_code', ''), ''),
             '作业计划编号': ticket.get('work_code', ''),
@@ -412,9 +505,110 @@ class RiskAssessor:
             '班组成员违章': _fmt_members_viol(ticket.get('work_member_uid', '')),
             '监护人': _fmt_name(ticket.get('guardian_uid', ''), ticket.get('guardian_uname', '')),
             '监护人违章': _fmt_viol(ticket.get('guardian_uid', '')),
+            '班组成员变更': change_member_text,
+            '新增人员违章': added_peccancy_text,
+            '人数调整': cinfo.get('member_adjustment', 0),
+            '调整后人数': cinfo.get('adjusted_count', ticket.get('work_member_count', '')),
             '工作内容': ticket.get('work_content', ''),
             '工作任务': ticket.get('work_task', ''),
         }
+
+    # ==================== 变更成员处理 ====================
+
+    def _process_change_members(self, change_member_dict: Dict,
+                                 peccancy_dict: Dict) -> Dict[str, Dict]:
+        """
+        处理班组成员变更记录：
+        1. 大模型解析 change_content 提取新增/退出人员姓名
+        2. 通过姓名查询新增人员的违章记录
+        3. 计算人数调整值
+        :return: {work_code: {added_names, removed_names, added_peccancy, member_adjustment, adjusted_count}}
+        """
+        import asyncio
+        import aiohttp
+
+        result = {}
+        # 收集所有 change_content 用于大模型解析
+        items_to_parse = []  # [(work_code, change_content), ...]
+        for wc, records in change_member_dict.items():
+            if records:
+                content = records[0].get('change_content', '')
+                if content:
+                    items_to_parse.append((wc, content))
+
+        if not items_to_parse:
+            return result
+
+        print(f"班组成员变更解析: 共 {len(items_to_parse)} 条变更记录等待大模型解析...")
+
+        # 并发调用大模型解析
+        loop = asyncio.new_event_loop()
+        try:
+            async def parse_all():
+                async with aiohttp.ClientSession() as session:
+                    from config_loader import get_llm_max_concurrent
+                    sem = asyncio.Semaphore(get_llm_max_concurrent())
+                    coros = [
+                        self.engine.parse_change_content(content, sem, session)
+                        for _, content in items_to_parse
+                    ]
+                    if coros:
+                        batch_size = 200
+                        all_results = []
+                        for i in range(0, len(coros), batch_size):
+                            batch = coros[i:i + batch_size]
+                            all_results.extend(await asyncio.gather(*batch))
+                        return all_results
+                    return []
+
+            parse_results = loop.run_until_complete(parse_all())
+        finally:
+            loop.close()
+
+        # 收集所有新增人员的姓名，统一批量查违章
+        all_added_names = set()
+        for (wc, _), parse_result in zip(items_to_parse, parse_results):
+            added_names = parse_result.get('added', [])
+            all_added_names.update(added_names)
+
+        # 批量按姓名查询违章记录
+        name_peccancy_dict = {}
+        if all_added_names:
+            name_peccancy_dict = self.fetcher.fetch_peccancy_by_names(list(all_added_names))
+            print(f"  按姓名查询违章: {len(all_added_names)} 人, 有违章记录 {sum(1 for v in name_peccancy_dict.values() if v)} 人")
+
+        # 处理解析结果
+        for (wc, _), parse_result in zip(items_to_parse, parse_results):
+            added_names = parse_result.get('added', [])
+            removed_names = parse_result.get('removed', [])
+
+            # 从批量查询结果中提取该 work_code 的新增人员违章
+            added_peccancy = {}
+            for name in added_names:
+                added_peccancy[name] = name_peccancy_dict.get(name, {})
+
+            # 计算人数调整
+            member_adjustment = len(added_names) - len(removed_names)
+
+            result[wc] = {
+                'added_names': added_names,
+                'removed_names': removed_names,
+                'added_peccancy': added_peccancy,
+                'member_adjustment': member_adjustment,
+            }
+
+            if added_names or removed_names:
+                add_str = f"新增{added_names}" if added_names else ""
+                rem_str = f"退出{removed_names}" if removed_names else ""
+                adj_str = f"调整{member_adjustment:+d}人" if member_adjustment != 0 else "人数不变"
+                print(f"  变更: {wc} -> {add_str} {rem_str} ({adj_str})")
+                if added_peccancy:
+                    for name, viol in added_peccancy.items():
+                        if viol:
+                            viol_str = ','.join(f'{k}类{viol[k]}次' for k in viol)
+                            print(f"    新增人员违章: {name} -> {viol_str}")
+
+        return result
 
     # ==================== B 值子计算 ====================
 
@@ -429,10 +623,19 @@ class RiskAssessor:
         results = []
         max_score = 0
         for ptype, puid, pname in persons:
-            score = self.engine.calc_person_awareness(peccancy_dict, puid)
-            results.append({'type': ptype, 'uid': puid, 'uname': pname, 'score': score})
-            if score > max_score:
-                max_score = score
+            parts = self.engine.split_member_ids(puid)
+            if not parts:
+                parts = [puid]
+            for part in parts:
+                score = self.engine.calc_person_awareness(peccancy_dict, part)
+                display_name = pname
+                if not display_name and not self.engine.contains_chinese(part):
+                    display_name = self._user_name_map.get(part, part)
+                elif not display_name:
+                    display_name = part
+                results.append({'type': ptype, 'uid': part, 'uname': display_name, 'score': score})
+                if score > max_score:
+                    max_score = score
         return max_score, results
 
     def _calc_member_awareness(self, ticket: Dict, peccancy_dict: Dict) -> int:
@@ -498,6 +701,7 @@ class RiskAssessor:
         llm_results: Dict, llm_location_results: Dict,
         work_plan: Dict,
         A: float = 0, A_details: Dict = None,
+        change_info: Dict = None,
     ) -> List[Dict]:
         """构建详细评估结果列表"""
         results = []
@@ -516,7 +720,7 @@ class RiskAssessor:
         ))
 
         # 2. 主要工作班成员安全意识
-        member_result, member_violations = self._build_member_result(ticket, peccancy_dict)
+        member_result, member_violations = self._build_member_result(ticket, peccancy_dict, change_info)
         results.append(self._make_detail(
             ticket, work_code, '主要工作班成员(辅助工除外)安全意识',
             '安全意识', member_result, member_score,
@@ -593,30 +797,66 @@ class RiskAssessor:
 
         return results
 
-    def _build_member_result(self, ticket: Dict, peccancy_dict: Dict) -> Tuple[str, Dict]:
+    def _build_member_result(self, ticket: Dict, peccancy_dict: Dict,
+                             change_info: Dict = None) -> Tuple[str, Dict]:
         """构建班组成员评估结果"""
         work_member_uid = ticket.get('work_member_uid')
+        work_member_uname = ticket.get('work_member_uname', '')
         member_parts = []
         member_violations = {}
-        if work_member_uid:
-            for mid in work_member_uid.split(','):
-                if not mid.strip():
+
+        def _parse_member_list(s):
+            if not s:
+                return []
+            result = []
+            for item in s.split(','):
+                item = item.strip()
+                if not item:
                     continue
-                parts = self.engine.split_member_ids(mid.strip())
-                if not parts:
-                    parts = [mid.strip()]
-                for part in parts:
-                    display = self.engine.clean_bracket_content(part) or part
-                    # 若display为纯ID（不含中文），尝试从姓名映射中解析为真实姓名
-                    if not self.engine.contains_chinese(display):
-                        resolved_name = self._user_name_map.get(part, '') or self._user_name_map.get(display, '')
-                        if resolved_name:
-                            display = resolved_name
-                    viol = peccancy_dict.get(part, {})
-                    viol_desc = '无违章' if not viol else ','.join([f'{k}类{viol[k]}次' for k in viol])
-                    member_parts.append(f"工作班成员【{display}】{'存在' if viol else ''}{viol_desc}")
-                    for k, v in viol.items():
-                        member_violations[k] = member_violations.get(k, 0) + v
+                parts = self.engine.split_member_ids(item)
+                if parts:
+                    result.extend(parts)
+                else:
+                    result.append(item)
+            return result
+
+        uid_list = _parse_member_list(work_member_uid)
+        uname_list = _parse_member_list(work_member_uname)
+
+        name_map = {}
+        for i, uid in enumerate(uid_list):
+            if i < len(uname_list) and uname_list[i]:
+                name_map[uid] = uname_list[i]
+
+        if work_member_uid:
+            for part in uid_list:
+                display = self.engine.clean_bracket_content(part) or part
+                if not self.engine.contains_chinese(display):
+                    resolved_name = (name_map.get(part, '') or
+                                     self._user_name_map.get(part, '') or
+                                     name_map.get(display, '') or
+                                     self._user_name_map.get(display, ''))
+                    if resolved_name:
+                        display = resolved_name
+                viol = peccancy_dict.get(part, {})
+                viol_desc = '无违章' if not viol else ','.join([f'{k}类{viol[k]}次' for k in viol])
+                member_parts.append(f"工作班成员【{display}】{'存在' if viol else ''}{viol_desc}")
+                for k, v in viol.items():
+                    member_violations[k] = member_violations.get(k, 0) + v
+
+        # 追加变更新增人员的违章记录
+        if change_info:
+            added_peccancy = change_info.get('added_peccancy', {})
+            added_names = change_info.get('added_names', [])
+            if added_peccancy:
+                for name in added_names:
+                    viol = added_peccancy.get(name, {})
+                    if viol:
+                        viol_desc = ','.join([f'{k}类{viol[k]}次' for k in viol])
+                        member_parts.append(f"工作班成员【{name}】(新增)存在{viol_desc}")
+                        for k, v in viol.items():
+                            member_violations[k] = member_violations.get(k, 0) + v
+
         return '; '.join(member_parts) if member_parts else '无人员', member_violations
 
     def _format_time_period_result(self, work_time_period: str, work_plan: Dict) -> str:
@@ -686,12 +926,22 @@ class RiskAssessor:
             for field in ['work_principal_uid', 'guardian_uid']:
                 uid = t.get(field)
                 if uid:
-                    all_ids.add(uid)
+                    parts = self.engine.split_member_ids(uid)
+                    if parts:
+                        all_ids.update(parts)
+                    else:
+                        all_ids.add(uid)
             member_uid = t.get('work_member_uid')
             if member_uid:
                 for mid in member_uid.split(','):
-                    if mid.strip():
-                        all_ids.add(mid.strip())
+                    mid = mid.strip()
+                    if not mid:
+                        continue
+                    parts = self.engine.split_member_ids(mid)
+                    if parts:
+                        all_ids.update(parts)
+                    else:
+                        all_ids.add(mid)
         return list(all_ids)
 
     def _fast_classify_user_ids(self, all_user_ids: List[str], peccancy_dict: Dict,
@@ -941,14 +1191,26 @@ class RiskAssessor:
                 for field in ['work_principal_uid', 'guardian_uid']:
                     uid = t.get(field)
                     if uid:
-                        all_user_ids.add(uid)
-                        all_same_type_ids.add(uid)
+                        parts = self.engine.split_member_ids(uid)
+                        if parts:
+                            all_user_ids.update(parts)
+                            all_same_type_ids.update(parts)
+                        else:
+                            all_user_ids.add(uid)
+                            all_same_type_ids.add(uid)
                 member_uid = t.get('work_member_uid')
                 if member_uid:
                     for mid in member_uid.split(','):
-                        if mid.strip():
-                            all_user_ids.add(mid.strip())
-                            all_same_type_ids.add(mid.strip())
+                        mid = mid.strip()
+                        if not mid:
+                            continue
+                        parts = self.engine.split_member_ids(mid)
+                        if parts:
+                            all_user_ids.update(parts)
+                            all_same_type_ids.update(parts)
+                        else:
+                            all_user_ids.add(mid)
+                            all_same_type_ids.add(mid)
 
             # 查询违章
             peccancy_dict = self.fetcher.fetch_peccancy_records(list(all_user_ids))
@@ -1024,33 +1286,59 @@ class RiskAssessor:
         for uid_field in ['work_principal_uid', 'guardian_uid']:
             uid = ticket.get(uid_field)
             if uid:
-                safety_score += self.engine.calc_person_awareness(peccancy_dict, uid)
+                parts = self.engine.split_member_ids(uid)
+                if not parts:
+                    parts = [uid]
+                for part in parts:
+                    safety_score += self.engine.calc_person_awareness(peccancy_dict, part)
 
         member_uid = ticket.get('work_member_uid')
         if member_uid:
             for mid in member_uid.split(','):
-                if mid.strip():
-                    safety_score += self.engine.calc_person_awareness(peccancy_dict, mid.strip())
+                mid = mid.strip()
+                if not mid:
+                    continue
+                parts = self.engine.split_member_ids(mid)
+                if not parts:
+                    parts = [mid]
+                for part in parts:
+                    safety_score += self.engine.calc_person_awareness(peccancy_dict, part)
 
         # 作业总人数
         work_count_score = self.engine.calc_work_count(ticket.get('work_member_count'))
 
         # 人员性质
-        _, nature_score = self.engine.calc_personnel_nature(ticket.get('task_main'))
+        nature_desc, nature_score = self.engine.calc_personnel_nature(
+            ticket.get('task_main'),
+            ticket.get('whether_outer_dept'),
+            ticket.get('work_principal_oname'),
+        )
 
         # 同类型作业经验
         same_type_score = 0
         if task_type:
             for uid_field in ['work_principal_uid', 'guardian_uid']:
                 uid = ticket.get(uid_field)
-                if uid and uid in same_type_dict and task_type in same_type_dict[uid]:
-                    same_type_score += same_type_dict[uid][task_type]['score']
+                if uid:
+                    parts = self.engine.split_member_ids(uid)
+                    if not parts:
+                        parts = [uid]
+                    for part in parts:
+                        if part in same_type_dict and task_type in same_type_dict[part]:
+                            same_type_score += same_type_dict[part][task_type]['score']
             if member_uid:
                 for mid in member_uid.split(','):
-                    if mid.strip() and mid.strip() in same_type_dict and task_type in same_type_dict[mid.strip()]:
-                        s = same_type_dict[mid.strip()][task_type]['score']
-                        if s > same_type_score:
-                            same_type_score = s
+                    mid = mid.strip()
+                    if not mid:
+                        continue
+                    parts = self.engine.split_member_ids(mid)
+                    if not parts:
+                        parts = [mid]
+                    for part in parts:
+                        if part in same_type_dict and task_type in same_type_dict[part]:
+                            s = same_type_dict[part][task_type]['score']
+                            if s > same_type_score:
+                                same_type_score = s
 
         # 作业地段（大模型优先）
         llm_loc = llm_location_results.get(ticket_key, {})
@@ -1103,7 +1391,7 @@ class RiskAssessor:
             'c_score': C,
             'd_score': 0,
             'work_member_count': ticket.get('work_member_count'),
-            'principal_nature': '本单位-系统内人员' if ticket.get('task_main') in ['1.0', '本单位'] else '外单位-系统外人员',
+            'principal_nature': nature_desc,
             'work_location': ticket.get('work_place', ''),
             'work_type': ticket.get('major_sub_type', ''),
             'plan_nature': '计划性作业',

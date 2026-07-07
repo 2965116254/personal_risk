@@ -2,6 +2,8 @@
 """
 RiskRuleEngine 规则方法单元测试
 """
+import json
+import os
 import pytest
 from datetime import datetime, date
 
@@ -112,6 +114,113 @@ class TestPersonnelNature:
         assert desc == '外单位-系统外人员'
         assert score == 5
 
+    def test_outer_dept_ben_danwei(self, engine):
+        """工作票-外来单位为本单位"""
+        desc, score = engine.calc_personnel_nature('总包单位作业', whether_outer_dept='2.0')
+        assert desc == '本单位-系统内人员'
+        assert score == 0
+
+    def test_outer_dept_supplier_match(self, engine):
+        """工作票-外来单位为外单位，公司名称匹配供应商"""
+        # 手动设置 suppliers 用于测试
+        engine._suppliers = {'广州市优普计算机有限公司', '广州中软信息技术有限公司'}
+        desc, score = engine.calc_personnel_nature(
+            '总包单位作业', whether_outer_dept='1',
+            work_principal_oname='广州市优普计算机有限公司'
+        )
+        assert desc == '总包单位作业'
+        assert score == 3
+
+    def test_outer_dept_supplier_no_match(self, engine):
+        """工作票-外来单位为外单位，公司名称不匹配供应商"""
+        engine._suppliers = {'广州市优普计算机有限公司'}
+        desc, score = engine.calc_personnel_nature(
+            '总包单位作业', whether_outer_dept='1',
+            work_principal_oname='某未知公司'
+        )
+        assert desc == '分包作业'
+        assert score == 5
+
+    def test_outer_dept_no_supplier_name(self, engine):
+        """工作票-外来单位为外单位，但无公司名称"""
+        desc, score = engine.calc_personnel_nature(
+            '总包单位作业', whether_outer_dept='1',
+            work_principal_oname=None
+        )
+        assert desc == '分包作业'
+        assert score == 5
+
+    def test_outer_dept_empty_fallback(self, engine):
+        """工作票-外来单位为空，回退到 task_main"""
+        desc, score = engine.calc_personnel_nature('本单位', whether_outer_dept='')
+        assert desc == '本单位-系统内人员'
+        assert score == 0
+
+    def test_outer_dept_none_fallback(self, engine):
+        """工作票-外来单位为 None，回退到 task_main"""
+        desc, score = engine.calc_personnel_nature('总包单位作业', whether_outer_dept=None)
+        assert desc == '总包单位作业'
+        assert score == 3
+
+    def test_all_suppliers_are_zongbao(self, engine):
+        """验证 suppliers.json 中所有供应商都被归类为总包单位作业（得3分）"""
+        # 加载真实供应商列表
+        base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        suppliers_path = os.path.join(base_dir, 'cache', 'suppliers.json')
+        if not os.path.exists(suppliers_path):
+            pytest.skip(f"suppliers.json 不存在: {suppliers_path}")
+
+        with open(suppliers_path, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+        suppliers = data.get('suppliers', [])
+        assert len(suppliers) > 0, "suppliers.json 中供应商列表为空"
+
+        # 确保 engine 已加载真实供应商
+        assert len(engine._suppliers) > 0, "engine 未加载供应商数据"
+
+        # 验证每个供应商都被判定为总包单位作业
+        failures = []
+        for supplier_name in suppliers:
+            desc, score = engine.calc_personnel_nature(
+                '总包单位作业', whether_outer_dept='1',
+                work_principal_oname=supplier_name
+            )
+            if desc != '总包单位作业' or score != 3:
+                failures.append(f"{supplier_name}: desc={desc}, score={score}")
+
+        if failures:
+            pytest.fail(
+                f"以下供应商未被正确归类为总包单位作业（得3分）:\n" +
+                "\n".join(failures)
+            )
+
+    def test_excel_output_mapping(self):
+        """验证 Excel 输出中的人员性质说明映射与评分规则一致"""
+        from risk_rule_engine import RiskRuleEngine
+
+        nature_explanation = {
+            '本单位-系统内人员': '得0分',
+            '总包单位作业': '得3分',
+            '分包作业': '得5分',
+            '未知人员性质': '默认得0分',
+        }
+
+        expected_map = RiskRuleEngine.PERSONNEL_NATURE_MAP
+        # 各描述对应分值
+        desc_to_score = {
+            '本单位-系统内人员': 0,
+            '总包单位作业': 3,
+            '分包作业': 5,
+            '未知人员性质': 0,
+        }
+        for desc, expected_score in desc_to_score.items():
+            assert desc in nature_explanation, f"Excel 映射中缺少描述: {desc}"
+            score = expected_map.get(desc)
+            if score is None:
+                # "未知人员性质"、"本单位-系统内人员"等不在映射表中，默认0分
+                score = 0
+            assert score == expected_score, f"{desc} 分值不匹配: 期望{expected_score}, 实际{score}"
+
 
 # ==================== calc_same_type_score ====================
 
@@ -150,8 +259,11 @@ class TestWorkTimePeriodScore:
     def test_outdoor_night(self, engine):
         assert engine.calc_work_time_period_score('站外线路夜间作业(19:00-次日6:00)') == 20
 
-    def test_holiday(self, engine):
-        assert engine.calc_work_time_period_score('元旦、春节、清明、五一、端午、中秋、国庆法定节日期间作业') == 30
+    def test_spring_festival(self, engine):
+        assert engine.calc_work_time_period_score('特级、一级保供电涉及保供电设备的作业') == 30
+
+    def test_other_holiday(self, engine):
+        assert engine.calc_work_time_period_score('二级保供电期间') == 5
 
     def test_unknown(self, engine):
         assert engine.calc_work_time_period_score('未知时段') == 0

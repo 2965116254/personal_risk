@@ -250,6 +250,11 @@ def get_violation_api_config():
     return get_config().get('violation_api', {})
 
 
+def get_night_shift_config():
+    """获取夜间作业检测配置"""
+    return get_config().get('night_shift', {})
+
+
 def get_retention_days():
     """
     获取预计算结果保留天数。

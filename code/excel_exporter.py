@@ -48,6 +48,10 @@ class ExcelExporter:
         '班组成员违章',
         '监护人',
         '监护人违章',
+        '班组成员变更',
+        '新增人员违章',
+        '人数调整',
+        '调整后人数',
         '工作内容',
         '工作任务',
     ]
@@ -286,7 +290,7 @@ class ExcelExporter:
                     nature_explanation = {
                         '本单位-系统内人员': '得0分',
                         '总包单位作业': '得3分',
-                        '外单位-系统外人员': '得5分',
+                        '分包作业': '得5分',
                         '未知人员性质': '默认得0分',
                     }
                     explanation = nature_explanation.get(evaluation_result, f'对应规则得{rule_score}分')
@@ -471,7 +475,7 @@ class ExcelExporter:
         center_align = Alignment(horizontal='center', vertical='center', wrap_text=True)
         left_align = Alignment(horizontal='left', vertical='center', wrap_text=True)
         # 需要左对齐的列（工作内容、工作任务等文本列）
-        query_left_align_cols = {6, 7, 10, 11}
+        query_left_align_cols = {6, 7, 10, 11, 12, 13}
 
         for row in ws.iter_rows():
             for cell in row:
@@ -485,7 +489,7 @@ class ExcelExporter:
                     cell.alignment = left_align if cell.column in query_left_align_cols else center_align
 
         # 设置列宽
-        col_widths = [18, 22, 10, 12, 14, 18, 18, 12, 14, 30, 30]
+        col_widths = [18, 22, 10, 12, 14, 18, 18, 12, 14, 30, 30, 15, 15, 30, 30]
         for col_idx, width in enumerate(col_widths, 1):
             col_letter = ws.cell(row=1, column=col_idx).column_letter
             ws.column_dimensions[col_letter].width = width

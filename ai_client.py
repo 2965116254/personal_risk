@@ -2,6 +2,7 @@ import aiohttp
 import re
 import os
 import logging
+from typing import Dict
 from config_loader import get_llm_config
 
 # 使用 main.py 统一配置的日志，此处不再重复配置
@@ -579,3 +580,102 @@ async def evaluate_rule_judgment_with_llm(detailed_results, semaphore):
                 return "发现以下差异：\n" + "\n".join(differences)
             else:
                 return "规则计算结果与客户填写结果一致"
+
+# ====================== 变更内容解析 ======================
+async def parse_change_content_with_llm(change_content: str, semaphore, session=None) -> Dict:
+    """
+    大模型解析班组成员变更内容，提取新增人员和退出人员。
+    :param change_content: 变更内容文本，如"新增：张三，退出：李四"
+    :return: {'added': ['张三'], 'removed': ['李四']}
+    """
+    async with semaphore:
+        try:
+            change_content = str(change_content).strip() if change_content else ""
+            if not change_content:
+                return {'added': [], 'removed': []}
+
+            prompt = f"""
+你是一个电力工作票管理系统助手，请解析以下班组成员变更内容，提取出"新增"和"退出"的人员姓名。
+
+变更内容：{change_content}
+
+要求：
+1. 仔细阅读变更内容，找出所有"新增"的人员姓名
+2. 找出所有"退出/离开/减少/移除"的人员姓名
+3. 人员姓名通常是2-4个汉字的中文姓名
+4. 忽略非人名的内容（如"等"、"共X人"、"调整"等）
+5. 确保姓名准确，不要漏掉任何名字
+6. 如果某个名字带有括号注释（如"张三（临时）"），只需提取姓名部分"张三"
+
+输出格式（必须严格遵守JSON格式）：
+{{
+    "added": ["姓名1", "姓名2"],
+    "removed": ["姓名1", "姓名2"]
+}}
+
+如果没有新增人员，added 返回空数组 []。
+如果没有退出人员，removed 返回空数组 []。
+如果无法解析，返回 {{"added": [], "removed": []}}。
+""".strip()
+
+            llm_config = get_llm_config()
+            headers = {"Authorization": f"Bearer {llm_config['api_key']}"}
+            payload = {
+                "model": llm_config['model'],
+                "messages": [{"role": "user", "content": prompt}],
+                "temperature": 0,
+                "max_tokens": llm_config.get('max_tokens_change_content', 2048),
+            }
+
+            logging.debug(f"[大模型调用] 开始解析变更内容，服务地址: {llm_config['api_base']}, 变更内容: {change_content}")
+            
+            _owns = session is None
+            if _owns:
+                session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=llm_config.get('timeout_change_content', 60)))
+            try:
+                async with session.post(
+                    f"{llm_config['api_base']}/chat/completions",
+                    json=payload, headers=headers
+                ) as resp:
+                    if resp.status != 200:
+                        logging.warning(f"[大模型-变更解析] HTTP失败 status={resp.status}, 内容: {change_content}")
+                        return {'added': [], 'removed': []}
+                    
+                    j = await resp.json()
+                    msg = j.get('choices', [{}])[0].get('message', {}) or {}
+                    content = msg.get('content') or msg.get('reasoning') or ''
+                    content = content.strip() if content else ''
+
+                    # 尝试提取JSON
+                    import json
+                    try:
+                        # 查找 JSON 块（可能在 markdown 代码块中）
+                        json_start = content.find('{')
+                        json_end = content.rfind('}')
+                        if json_start >= 0 and json_end > json_start:
+                            json_str = content[json_start:json_end + 1]
+                            result = json.loads(json_str)
+                            added = result.get('added', [])
+                            removed = result.get('removed', [])
+                            # 确保是列表
+                            if not isinstance(added, list):
+                                added = []
+                            if not isinstance(removed, list):
+                                removed = []
+                            # 过滤空字符串
+                            added = [n.strip() for n in added if n and n.strip()]
+                            removed = [n.strip() for n in removed if n and n.strip()]
+                            logging.info(f"[大模型-变更解析] 变更内容={change_content}, 新增={added}, 退出={removed}")
+                            logging.debug(f"[大模型-变更解析] 原始响应: {content}")
+                            return {'added': added, 'removed': removed}
+                    except (json.JSONDecodeError, Exception) as e:
+                        logging.warning(f"[大模型-变更解析] JSON解析失败: {e}, 原始响应: {content}")
+
+                    return {'added': [], 'removed': []}
+            finally:
+                if _owns:
+                    await session.close()
+
+        except Exception as e:
+            logging.error(f"[大模型-变更解析] 异常: {str(e)}, 内容: {change_content}")
+            return {'added': [], 'removed': []}

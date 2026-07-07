@@ -10,6 +10,7 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
 import re
+import json
 import datetime
 import logging
 from typing import Optional, Dict, Any, Tuple, List
@@ -19,6 +20,7 @@ from ai_client import (
     evaluate_work_location_with_llm,
     is_chinese_name_with_llm,
     evaluate_location_type_with_llm,
+    parse_change_content_with_llm,
 )
 
 
@@ -79,7 +81,8 @@ class RiskRuleEngine:
         '正常时段作业': 0,
         '室内夜间作业(0点-次日6:00)': 20,
         '站外线路夜间作业(19:00-次日6:00)': 20,
-        '元旦、春节、清明、五一、端午、中秋、国庆法定节日期间作业': 30,
+        '特级、一级保供电涉及保供电设备的作业': 30,
+        '二级保供电期间': 5,
     }
 
     # 计划性质评分映射表
@@ -95,6 +98,7 @@ class RiskRuleEngine:
     def __init__(self):
         self._init_chinese_calendar()
         self._holiday_logged = False
+        self._suppliers = self._load_suppliers()
 
     def _init_chinese_calendar(self):
         """初始化 chinese_calendar 库"""
@@ -107,6 +111,24 @@ class RiskRuleEngine:
             self._calendar_available = False
             self._is_holiday_func = None
             self._get_holiday_detail_func = None
+
+    def _load_suppliers(self) -> set:
+        """加载供应商列表（用于判断总包/分包单位）"""
+        try:
+            base_dir = os.path.dirname(os.path.dirname(__file__))
+            suppliers_path = os.path.join(base_dir, 'cache', 'suppliers.json')
+            if os.path.exists(suppliers_path):
+                with open(suppliers_path, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+                    suppliers = set(data.get('suppliers', []))
+                    logging.info(f"已加载 {len(suppliers)} 个供应商名称")
+                    return suppliers
+            else:
+                logging.warning(f"供应商文件不存在: {suppliers_path}")
+                return set()
+        except Exception as e:
+            logging.warning(f"加载供应商文件失败: {e}")
+            return set()
 
     # ==================== 安全意识评分 ====================
 
@@ -156,12 +178,32 @@ class RiskRuleEngine:
 
     # ==================== 人员性质评分 ====================
 
-    def calc_personnel_nature(self, task_main: str) -> Tuple[str, int]:
+    def calc_personnel_nature(self, task_main: str, whether_outer_dept: str = None,
+                              work_principal_oname: str = None) -> Tuple[str, int]:
         """
         计算负责人的人员性质评分
+        优先级：工作票-外来单位 > 作业计划-作业主体
         :param task_main: 作业主体（本单位/总包单位作业）
+        :param whether_outer_dept: 工作票-外来单位（'1'=外单位, '2.0'=本单位）
+        :param work_principal_oname: 工作负责人所在单位名称
         :return: (人员性质描述, 风险分值)
         """
+        # 1. 优先使用工作票-外来单位判断
+        if whether_outer_dept is not None and whether_outer_dept != '':
+            outer_dept = str(whether_outer_dept).strip()
+            if outer_dept == '1':
+                # 外单位：判断是否为总包单位（供应商匹配）
+                if work_principal_oname and self._suppliers:
+                    company_name = str(work_principal_oname).strip()
+                    if company_name in self._suppliers:
+                        return '总包单位作业', 3
+                    else:
+                        return '分包作业', 5
+                return '分包作业', 5
+            elif outer_dept == '2.0':
+                return '本单位-系统内人员', 0
+
+        # 2. 工作票-外来单位无数据，回退到作业计划-作业主体判断
         if task_main == '本单位':
             return '本单位-系统内人员', 0
         if task_main == '总包单位作业':
@@ -231,7 +273,10 @@ class RiskRuleEngine:
         if holiday_enabled and plan_start_time:
             holiday_name = self.is_legal_holiday(plan_start_time)
             if holiday_name:
-                return '元旦、春节、清明、五一、端午、中秋、国庆法定节日期间作业'
+                if holiday_name == '春节':
+                    return '特级、一级保供电涉及保供电设备的作业'
+                else:
+                    return '二级保供电期间'
 
         # 2. 判断是否跨天
         if plan_start_time and plan_end_time:
@@ -355,3 +400,7 @@ class RiskRuleEngine:
     async def is_chinese_name(self, text: str, semaphore, session=None) -> bool:
         """大模型判断是否为中文姓名"""
         return await is_chinese_name_with_llm(text, semaphore, session)
+
+    async def parse_change_content(self, change_content: str, semaphore, session=None) -> Dict:
+        """大模型解析变更内容，返回 {added: [...], removed: [...]}"""
+        return await parse_change_content_with_llm(change_content, semaphore, session)

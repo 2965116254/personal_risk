@@ -128,7 +128,9 @@ class DataFetcher:
             END AS task_main,
             wp.task_type,
             wp.work_content,
-            wb.work_task
+            wb.work_task,
+            wb.whether_outer_dept,
+            wb.work_principal_oname
         FROM sp_ss_rc_work_plan wp
         LEFT JOIN (
             SELECT business_name, wticket_id
@@ -202,7 +204,9 @@ class DataFetcher:
             END AS task_main,
             wp.task_type,
             wp.work_content,
-            wb.work_task
+            wb.work_task,
+            wb.whether_outer_dept,
+            wb.work_principal_oname
         FROM sp_ss_rc_work_plan wp
         LEFT JOIN (
             SELECT business_name, wticket_id
@@ -248,6 +252,36 @@ class DataFetcher:
                 peccancy_dict[user_key][vtype] = peccancy_dict[user_key].get(vtype, 0) + r['count']
         return peccancy_dict
 
+    def fetch_peccancy_by_names(self, names: List[str]) -> Dict[str, Dict[str, int]]:
+        """
+        按人员姓名批量查询违章记录
+        用于查询新增变更人员的违章（新增人员只有姓名，没有ID）
+        :param names: 人员姓名列表
+        :return: {name: {'A': count, 'B': count, ...}, ...}
+        """
+        if not names:
+            return {}
+        query = """
+        SELECT peccancy_uname, peccancy_code, COUNT(*) AS count
+        FROM sp_ss_uq_peccancy_list_log 
+        WHERE peccancy_uname IN ({placeholders})
+        AND record_date >= DATE_FORMAT(CURDATE(), '%Y-01-01')
+        AND record_date < DATE_FORMAT(CURDATE() + INTERVAL 1 YEAR, '%Y-01-01')
+        GROUP BY peccancy_uname, peccancy_code;
+        """
+        records = self._batch_query(query, names)
+
+        peccancy_dict = {}
+        for r in records:
+            name = r['peccancy_uname']
+            code = r['peccancy_code']
+            if name not in peccancy_dict:
+                peccancy_dict[name] = {}
+            if code:
+                vtype = code[0].upper()
+                peccancy_dict[name][vtype] = peccancy_dict[name].get(vtype, 0) + r['count']
+        return peccancy_dict
+
     # ==================== 用户姓名映射查询 ====================
 
     def fetch_user_name_map(self, user_ids: List[str]) -> Dict[str, str]:
@@ -272,6 +306,39 @@ class DataFetcher:
             uid = r['peccancy_uid']
             if uid not in result:
                 result[uid] = r['peccancy_uname']
+        return result
+
+    # ==================== 变更成员查询 ====================
+
+    def fetch_change_members(self, work_codes: List[str]) -> Dict[str, List[Dict]]:
+        """
+        批量查询班组成员变更记录（从 sp_pd_wticket_change_member 表）
+        先通过 sp_pd_wticket_business_re 关联 work_code -> wticket_id，
+        再查询 sp_pd_wticket_change_member 获取变更内容。
+        :param work_codes: 作业计划编号列表
+        :return: {work_code: [{change_content, ...}, ...], ...}
+        """
+        if not work_codes:
+            return {}
+        query = """
+        SELECT wp.work_code, wm.change_content, wm.update_time
+        FROM sp_ss_rc_work_plan wp
+        LEFT JOIN sp_pd_wticket_business_re re ON wp.work_code = re.business_name
+        LEFT JOIN sp_pd_wticket_change_member wm ON re.wticket_id = wm.wticket_id
+        WHERE wp.work_code IN ({placeholders})
+          AND wm.change_content IS NOT NULL AND wm.change_content != ''
+        ORDER BY wm.update_time DESC
+        """
+        records = self._batch_query(query, work_codes)
+        result = {}
+        for r in records:
+            wc = r['work_code']
+            if wc not in result:
+                result[wc] = []
+            result[wc].append({
+                'change_content': r.get('change_content', ''),
+                'update_time': r.get('update_time'),
+            })
         return result
 
     # ==================== 动火作业票查询 ====================
@@ -418,7 +485,8 @@ class DataFetcher:
             wb.work_principal_uid, wb.work_member_uid, wb.guardian_uid,
             wb.work_member_count, wp.task_main, wp.work_code, wp.task_type,
             wp.plan_start_time, wp.release_time, wp.work_place,
-            wp.major_sub_type, wp.work_content, wb.work_task
+            wp.major_sub_type, wp.work_content, wb.work_task,
+            wb.whether_outer_dept, wb.work_principal_oname
         FROM sp_pd_wticket_base wb
         JOIN sp_ss_rc_work_plan wp ON wb.ticket_source_id = wp.id
         WHERE wp.create_time >= %s AND wp.create_time <= %s

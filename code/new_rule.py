@@ -19,6 +19,7 @@ from apscheduler.events import EVENT_JOB_EXECUTED, EVENT_JOB_ERROR
 
 from risk_assessor import RiskAssessor
 from main import run_risk_calculation, get_query_params
+from night_shift_detector import run_night_shift_detection, NightShiftDetector
 
 
 def job_listener(event):
@@ -134,6 +135,43 @@ def main():
         print(f"添加日预计算定时任务: 每天 {precalc_hour}:{precalc_minute:02d} 执行")
     else:
         print("日预计算任务未启用")
+
+    # ==================== 夜间作业检测任务 ====================
+    night_shift_cfg = config.get('night_shift', {})
+    if night_shift_cfg.get('enabled', True):
+        # 厂站工作票夜间作业检测
+        station_cfg = night_shift_cfg.get('station', {})
+        if station_cfg.get('enabled', True):
+            sh = int(station_cfg.get('hour', 0))
+            sm = int(station_cfg.get('minute', 0))
+            scheduler.add_job(
+                run_night_shift_detection,
+                CronTrigger(hour=sh, minute=sm),
+                id='night_shift_station',
+                name=f'夜间作业检测-厂站票_{sh:02d}:{sm:02d}',
+                replace_existing=True,
+                max_instances=1,
+                misfire_grace_time=300,
+            )
+            print(f"添加夜间作业检测定时任务（厂站票）: 每天 {sh:02d}:{sm:02d} 执行")
+
+        # 线路工作票夜间作业检测
+        line_cfg = night_shift_cfg.get('line', {})
+        if line_cfg.get('enabled', True):
+            lh = int(line_cfg.get('hour', 20))
+            lm = int(line_cfg.get('minute', 0))
+            scheduler.add_job(
+                run_night_shift_detection,
+                CronTrigger(hour=lh, minute=lm),
+                id='night_shift_line',
+                name=f'夜间作业检测-线路票_{lh:02d}:{lm:02d}',
+                replace_existing=True,
+                max_instances=1,
+                misfire_grace_time=300,
+            )
+            print(f"添加夜间作业检测定时任务（线路票）: 每天 {lh:02d}:{lm:02d} 执行")
+    else:
+        print("夜间作业检测任务未启用")
 
     scheduler.start()
     print("定时任务调度器已启动")
