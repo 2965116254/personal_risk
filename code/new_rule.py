@@ -59,9 +59,18 @@ def run_daily_precalculation():
 
         print(f"查询参数: limit={limit}, 时间过滤: 查询时间区间 {query_start_date} ~ {query_end_date}（区间重叠判断）")
 
+        # 加载前一天的夜间作业详情（work_codes + 检测时间 + 详细检测信息）
+        night_shift_work_codes, night_shift_detection_desc, night_shift_details = \
+            NightShiftDetector.load_yesterday_night_shift_work_codes()
+        if night_shift_work_codes:
+            print(f"加载前一天夜间作业检测结果: {len(night_shift_work_codes)} 条")
+
         # 执行完整评估（含大模型），DataCache 自动保存 LLM 结果到 processed_*.json
         assessor = RiskAssessor(db_config)
-        results = assessor.assess(limit=limit, query_start_date=query_start_date, query_end_date=query_end_date)
+        results = assessor.assess(limit=limit, query_start_date=query_start_date, query_end_date=query_end_date,
+                                  night_shift_work_codes=night_shift_work_codes,
+                                  night_shift_detection_desc=night_shift_detection_desc,
+                                  night_shift_details=night_shift_details)
 
         if not results:
             print("预计算未获取到数据")

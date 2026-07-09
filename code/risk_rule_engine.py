@@ -19,7 +19,6 @@ from ai_client import (
     evaluate_work_task_with_llm,
     evaluate_work_location_with_llm,
     is_chinese_name_with_llm,
-    evaluate_location_type_with_llm,
     parse_change_content_with_llm,
 )
 
@@ -392,10 +391,6 @@ class RiskRuleEngine:
     async def evaluate_work_location(self, work_content: str, semaphore, session=None) -> Dict:
         """大模型评估作业地段"""
         return await evaluate_work_location_with_llm(work_content, semaphore, session)
-
-    async def evaluate_location_type(self, work_task: str, semaphore, session=None) -> Dict:
-        """大模型判断站内/站外"""
-        return await evaluate_location_type_with_llm(work_task, semaphore, session)
 
     async def is_chinese_name(self, text: str, semaphore, session=None) -> bool:
         """大模型判断是否为中文姓名"""

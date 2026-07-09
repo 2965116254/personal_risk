@@ -51,10 +51,16 @@ class RiskAssessor:
 
     def assess(self, limit: int = None, query_start_date: str = None, query_end_date: str = None,
                use_cache: bool = True, work_codes: List[str] = None,
-               incremental_output: bool = False) -> List[Dict]:
+               incremental_output: bool = False,
+               night_shift_work_codes: Set[str] = None,
+               night_shift_detection_desc: str = '',
+               night_shift_details: Dict = None) -> List[Dict]:
         """执行风险评估主流程，返回评估结果列表
         :param work_codes: 若指定，则按作业计划编号列表查询，忽略 limit/query_start_date/query_end_date
         :param incremental_output: 是否只返回增量数据（跳过缓存中已存在的工作票），用于 Excel 增量输出
+        :param night_shift_work_codes: 夜间作业 work_code 集合，其中包含的票的C3（作业时段）将被强制判定为夜间作业
+        :param night_shift_detection_desc: 夜间作业检测时间描述，如 "线路检测: 2026-07-08 20:05:00, 厂站检测: 2026-07-09 00:02:00"
+        :param night_shift_details: 夜间作业详细检测信息 {work_code: {ticket_type, last_gap_time, last_gap_start_time, detected_at, ...}}
         """
         self.fetcher.connect()
         cache = DataCache()
@@ -77,11 +83,18 @@ class RiskAssessor:
                 # 找出新增的 work_code
                 new_codes = [wc for wc in all_work_codes if wc not in cached_codes]
 
+                # 夜间作业：即使已缓存，C3分值已变动，需要重新拉取处理
+                ns_codes = night_shift_work_codes or set()
+                ns_reprocess = [wc for wc in all_work_codes if wc in cached_codes and wc in ns_codes]
+                if ns_reprocess:
+                    print(f"夜间作业重新拉取: {len(ns_reprocess)} 条（已缓存但C3分值变动）")
+                    new_codes.extend(ns_reprocess)
+
                 if not new_codes:
                     print(f"所有 {len(all_work_codes)} 条均已缓存（增量模式），跳过处理")
                     return []
 
-                print(f"缓存命中 {len(all_work_codes) - len(new_codes)} 条，新增 {len(new_codes)} 条")
+                print(f"缓存命中 {len(all_work_codes) - len(new_codes)} 条，新增 {len(new_codes)} 条（含夜间作业重新拉取 {len(ns_reprocess)} 条）")
                 # 阶段2: 只查新增的完整数据
                 work_tickets = self.fetcher.fetch_work_tickets_by_codes(new_codes)
             else:
@@ -97,7 +110,7 @@ class RiskAssessor:
             # 2. 增量对比：找出需要大模型评估的新票
             # 注意：增量模式下 work_tickets 已全是新增，find_new_tickets 会全部返回为新增
             new_tickets = work_tickets
-            cached_llm = {}  # {work_code: {llm_result, llm_location, llm_location_type}}
+            cached_llm = {}  # {work_code: {llm_result, llm_location}}
             if use_cache:
                 new_tickets, cached_llm = cache.find_new_tickets(work_tickets)
                 skip_work_codes = set(cached_llm.keys())
@@ -132,11 +145,11 @@ class RiskAssessor:
                             and len(cached_llm) > 0)
             if can_skip_llm:
                 print(f"所有 {len(work_tickets)} 条工作票和人员ID均已缓存，跳过LLM调用")
-                llm_results, loc_results, lt_results = {}, {}, {}
+                llm_results, loc_results = {}, {}
                 classify_results = {}
                 new_user_id_types = {}
             else:
-                llm_results, loc_results, lt_results, classify_results = self._run_llm_evaluations(
+                llm_results, loc_results, classify_results = self._run_llm_evaluations(
                     work_tickets, skip_work_codes=skip_work_codes,
                     classify_items=need_llm_classify
                 )
@@ -155,7 +168,7 @@ class RiskAssessor:
 
             # 8. 合并缓存的大模型结果
             if cached_llm:
-                self._merge_cached_llm_results(llm_results, loc_results, lt_results,
+                self._merge_cached_llm_results(llm_results, loc_results,
                                                cached_llm, work_tickets)
 
             # 9. 批量查询作业计划详情
@@ -197,13 +210,18 @@ class RiskAssessor:
             # 12. 逐张计算风险值
             t0 = time.time()
             results = []
+            # 夜间作业 work_code 集合
+            night_shift_codes = night_shift_work_codes or set()
             for idx, ticket in enumerate(work_tickets):
                 result = self._calc_single_ticket(
                     ticket, idx, peccancy_dict, hot_work_dict,
-                    llm_results, loc_results, lt_results,
+                    llm_results, loc_results,
                     work_plan_details, dynamic_risk_dict, dynamic_risk_d_dict, benchmark_dict,
                     change_member_dict=change_member_dict,
                     change_info=change_info,
+                    night_shift_work_codes=night_shift_codes,
+                    night_shift_detection_desc=night_shift_detection_desc,
+                    night_shift_details=night_shift_details,
                 )
                 results.append(result)
             print(f"[耗时] 逐张计算风险值: {time.time() - t0:.1f}s, 共 {len(results)} 条")
@@ -211,15 +229,23 @@ class RiskAssessor:
             print(f"共评估 {len(results)} 条工作计划编号")
 
             # 12.5 增量输出模式：只输出本次新增的工作票（即不在缓存中的票）
+            # 但夜间作业的票始终保留（即使已被缓存，也需要重新输出到Excel）
             if incremental_output and use_cache:
                 new_work_codes = {t.get('work_code', '') for t in new_tickets if t.get('work_code')}
-                results = [r for r in results if r.get('作业计划编号', '') in new_work_codes]
-                print(f"增量输出: 过滤后剩余 {len(results)} 条新增工作计划编号")
+                night_shift_codes_filtered = night_shift_work_codes or set()
+                results = [
+                    r for r in results
+                    if r.get('作业计划编号', '') in new_work_codes
+                    or r.get('is_night_shift', False)
+                ]
+                # 统计新增中夜间作业的数量
+                ns_in_new = sum(1 for r in results if r.get('is_night_shift', False))
+                print(f"增量输出: 过滤后剩余 {len(results)} 条（其中夜间作业 {ns_in_new} 条）")
 
             # 13. 保存当天新增的大模型评估结果和人员ID类型到缓存
             if use_cache:
                 new_llm_for_cache = self._extract_new_llm_results(
-                    new_tickets, llm_results, loc_results, lt_results, work_tickets
+                    new_tickets, llm_results, loc_results, work_tickets
                 )
                 cache.save_cache(cache.get_today_str(), new_llm_for_cache,
                                  user_id_types=new_user_id_types)
@@ -249,9 +275,12 @@ class RiskAssessor:
     def _calc_single_ticket(
         self, ticket: Dict, ticket_idx: int,
         peccancy_dict: Dict, hot_work_dict: Dict,
-        llm_results: Dict, llm_location_results: Dict, llm_location_type_results: Dict,
+        llm_results: Dict, llm_location_results: Dict,
         work_plan_details: Dict, dynamic_risk_dict: Dict, dynamic_risk_d_dict: Dict, benchmark_dict: Dict,
         change_member_dict: Dict = None, change_info: Dict = None,
+        night_shift_work_codes: Set[str] = None,
+        night_shift_detection_desc: str = '',
+        night_shift_details: Dict = None,
     ) -> Dict:
         """计算单张工作票的风险值"""
         work_code = ticket.get('work_code', '')
@@ -300,8 +329,106 @@ class RiskAssessor:
         C += work_type_score
 
         # C3: 作业时段
-        work_time_period = self._calc_work_time_period(work_plan, work_task, ticket_key, llm_location_type_results)
-        work_time_period_score = self.engine.calc_work_time_period_score(work_time_period)
+        # 如果该工作票被检测为夜间作业，强制判定为夜间作业
+        is_night_shift = night_shift_work_codes and work_code in night_shift_work_codes
+        night_shift_judgment = ''
+
+        # 即使检测为夜间作业，如果工作内容包含【机巡】、【智能巡检】、【智能巡视】等关键词，也不计入夜间作业
+        if is_night_shift:
+            # 优先从检测详情获取工作内容，回退到 ticket 自身字段
+            ns_detail = (night_shift_details or {}).get(work_code, {})
+            ns_work_task = ns_detail.get('work_task', '') or ''
+            ticket_work_task = ticket.get('work_task', '') or ''
+            work_task_check = ns_work_task or ticket_work_task
+            if work_task_check and any(kw in work_task_check for kw in
+                                       ['机巡', '智能巡检', '智能巡视']):
+                logging.info(
+                    f"夜间作业检测命中但工作内容包含排除关键词（{work_code}），"
+                    f"取消夜间作业判定: {work_task_check[:60]}"
+                )
+                is_night_shift = False
+
+        if is_night_shift:
+            # 从夜间作业检测详情中获取该 work_code 的检测信息
+            ns_detail = (night_shift_details or {}).get(work_code, {})
+            # ticket_type 优先从检测详情获取（新JSON），回退到 ticket 自身字段（旧JSON或数据库）
+            ticket_type_val = str(ns_detail.get('ticket_type', '') or ticket.get('ticket_type', '') or '')
+            detected_at = ns_detail.get('detected_at', '') or ''
+
+            # last_gap_time/last_gap_start_time：优先从检测详情（新JSON有details字段），
+            # 回退到 ticket（数据库查询已包含 wb.last_gap_time/wb.last_gap_start_time），
+            # 处理 datetime 对象 → 字符串格式化
+            def _fmt_gap(val):
+                if val is None:
+                    return None
+                if isinstance(val, str):
+                    return val
+                if hasattr(val, 'strftime'):
+                    return val.strftime('%Y-%m-%d %H:%M:%S')
+                return str(val)
+
+            last_gap_time = _fmt_gap(
+                ns_detail.get('last_gap_time') or ticket.get('last_gap_time')
+            )
+            last_gap_start_time = _fmt_gap(
+                ns_detail.get('last_gap_start_time') or ticket.get('last_gap_start_time')
+            )
+
+            # 检测时间回退：从检测时间描述中提取
+            if not detected_at and night_shift_detection_desc:
+                # 尝试从 "线路检测: 2026-07-08 20:05:00, 厂站检测: 2026-07-09 00:02:00" 中提取
+                import re
+                if ticket_type_val in ('21', '22'):
+                    m = re.search(r'线路检测:\s*([\d\-]+\s[\d:]+)', night_shift_detection_desc)
+                    if m:
+                        detected_at = m.group(1)
+                elif ticket_type_val in ('11', '12', '13'):
+                    m = re.search(r'厂站检测:\s*([\d\-]+\s[\d:]+)', night_shift_detection_desc)
+                    if m:
+                        detected_at = m.group(1)
+                else:
+                    m = re.search(r'(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2})', night_shift_detection_desc)
+                    if m:
+                        detected_at = m.group(1)
+
+            # 根据工作票类型判定室内/室外，构建C3列值和问题描述判定文本
+            if ticket_type_val in ('11', '12', '13'):
+                # 厂站工作票 → 室内夜间作业
+                c3_label = '室内夜间作业(0点-次日6:00)'
+                if last_gap_time:
+                    night_shift_judgment = (
+                        f'室内夜间作业(0点-次日6:00)，系统时间{detected_at}，'
+                        f'最后一次开工时间{last_gap_start_time}大于'
+                        f'最后一次间断时间{last_gap_time}，判定为夜间作业'
+                    )
+                else:
+                    night_shift_judgment = (
+                        f'室内夜间作业(0点-次日6:00)，系统时间{detected_at}，'
+                        f'无最后一次间断时间，但系统时间内工作票状态在执行中，判定为夜间作业'
+                    )
+            elif ticket_type_val in ('21', '22'):
+                # 线路工作票 → 室外夜间作业
+                c3_label = '室外夜间作业(19:00-次日6:00)'
+                night_shift_judgment = (
+                    f'室外夜间作业(19:00-次日6:00)，系统时间{detected_at}，'
+                    f'系统时间内工作票状态在执行中，判定为夜间作业'
+                )
+            else:
+                # 无详细检测信息（旧JSON格式或未知类型）
+                c3_label = '夜间作业'
+                night_shift_judgment = (
+                    f'夜间作业，系统时间{detected_at}，'
+                    f'工作票状态在执行中，判定为夜间作业'
+                )
+
+            # C3列值：显示"室内夜间作业(0点-次日6:00) [系统时间: XXX]"
+            work_time_period = f'{c3_label} [系统时间: {detected_at}]'
+            work_time_period_score = 20
+
+            print(f"  夜间作业强制判定: {work_code} -> {night_shift_judgment[:80]}...")
+        else:
+            work_time_period = self._calc_work_time_period(work_plan, work_task)
+            work_time_period_score = self.engine.calc_work_time_period_score(work_time_period)
         C += work_time_period_score
 
         # D: 电网、设备风险联动值（从数据库 DIMENSION_TYPE='3.00' 的人工评估中获取）
@@ -335,10 +462,24 @@ class RiskAssessor:
         # F: 总风险值（含基准风险值A）
         F = B + C + D + A
 
-        # 变更成员信息（先提取，用于传递给 _build_detailed_results）
+        # 变更成员信息（先提取，用于传递给 _build_detailed_results 和查询数据）
         change_info_for_ticket = (change_info or {}).get(work_code, {})
-        # 计算调整后人数
+        # 计算调整后人数（将人员变动反映到 B3 作业总人数评分中）
         original_count = ticket.get('work_member_count')
+        member_adjustment = change_info_for_ticket.get('member_adjustment', 0)
+        adjusted_work_count = original_count
+        if member_adjustment:
+            try:
+                adjusted_work_count = max(0, int(original_count or 0) + member_adjustment)
+                # 重新计算 B3 分值（人员变动影响总人数），然后更新 B 和 F
+                work_count_score = self.engine.calc_work_count(adjusted_work_count)
+                B = principal_guardian_score + member_score + work_count_score + principal_nature_score
+                F = B + C + D + A
+                print(f"  人员变动调整: {work_code} 原始人数 {original_count} -> 调整后 {adjusted_work_count} (调整{member_adjustment:+d}), B3分值更新")
+            except (ValueError, TypeError):
+                adjusted_work_count = original_count
+        # 保存调整后人数（供 _build_query_data 的'调整后人数'字段使用）
+        change_info_for_ticket['adjusted_count'] = adjusted_work_count
 
         # --- 生成详细评估结果 ---
         detailed_results = self._build_detailed_results(
@@ -351,6 +492,7 @@ class RiskAssessor:
             llm_results, llm_location_results,
             work_plan, A, A_details,
             change_info=change_info_for_ticket,
+            adjusted_work_count=adjusted_work_count,
         )
 
         bureau_code = ticket.get('bureau_code', '')
@@ -371,6 +513,8 @@ class RiskAssessor:
             '详细评估结果': detailed_results,
             '查询数据': self._build_query_data(ticket, peccancy_dict, work_code, change_info),
             '变更成员': change_info_for_ticket,
+            'is_night_shift': is_night_shift,
+            'night_shift_judgment': night_shift_judgment,
         }
 
     # ==================== 查询数据构建 ====================
@@ -670,22 +814,16 @@ class RiskAssessor:
             logging.debug(f"[评分获取] ticket_key={ticket_key}, score=0, rule={rule}")
         return score
 
-    def _calc_work_time_period(self, work_plan: Dict, work_task: str,
-                                ticket_key: str, llm_location_type_results: Dict) -> str:
+    def _calc_work_time_period(self, work_plan: Dict, work_task: str) -> str:
         """计算作业时段"""
         plan_start = work_plan.get('plan_start_time')
         plan_end = work_plan.get('plan_end_time')
         actual_start = work_plan.get('actual_start_time')
         actual_end = work_plan.get('actual_end_time')
 
-        location_type = None
-        lt_result = llm_location_type_results.get(ticket_key, {})
-        if lt_result:
-            location_type = lt_result.get('location_type')
-
         return self.engine.determine_work_time_period(
             plan_start, plan_end, actual_start, actual_end,
-            work_task, location_type,
+            work_task, None,
         )
 
     # ==================== 详细评估结果构建 ====================
@@ -702,6 +840,7 @@ class RiskAssessor:
         work_plan: Dict,
         A: float = 0, A_details: Dict = None,
         change_info: Dict = None,
+        adjusted_work_count=None,
     ) -> List[Dict]:
         """构建详细评估结果列表"""
         results = []
@@ -727,10 +866,11 @@ class RiskAssessor:
             customer_scores.get('主要工作班成员（辅助工除外）安全意识', 0),
         ))
 
-        # 3. 作业总人数
+        # 3. 作业总人数（如有人员变动，显示调整后人数）
+        display_count = adjusted_work_count if adjusted_work_count is not None else ticket.get('work_member_count', '未知')
         results.append(self._make_detail(
             ticket, work_code, '作业总人数', '作业总人数',
-            str(ticket.get('work_member_count', '未知')),
+            str(display_count),
             work_count_score, customer_scores.get('作业总人数', 0),
         ))
 
@@ -1000,18 +1140,17 @@ class RiskAssessor:
 
     def _run_llm_evaluations(self, work_tickets: List[Dict],
                               skip_work_codes: Set[str] = None,
-                              classify_items: List[str] = None) -> Tuple[Dict, Dict, Dict, Dict]:
-        """并发执行所有大模型评估（人员分类 + 工作任务 + 作业地段 + 站内/站外判断）
+                              classify_items: List[str] = None) -> Tuple[Dict, Dict, Dict]:
+        """并发执行所有大模型评估（人员分类 + 工作任务 + 作业地段）
         :param skip_work_codes: 需要跳过的 work_code 集合（缓存已命中）
         :param classify_items: 需要大模型判断是否为中文姓名的项
-        :return: (task_results, loc_results, lt_results, classify_results)
+        :return: (task_results, loc_results, classify_results)
             - classify_results: {item: is_chinese_name} 或空 dict
         """
         skip_work_codes = skip_work_codes or set()
         classify_items = classify_items or []
         tasks = []
         locations = []
-        location_types = []
 
         for idx, ticket in enumerate(work_tickets):
             work_task = (ticket.get('work_task') or '').strip()
@@ -1024,14 +1163,12 @@ class RiskAssessor:
             if work_code in skip_work_codes:
                 tasks.append((ticket_key, None))
                 locations.append((ticket_key, None))
-                location_types.append((ticket_key, None))
             else:
                 tasks.append((ticket_key, work_task))
                 locations.append((ticket_key, work_task))
-                location_types.append((ticket_key, work_task))
 
         if not tasks and not classify_items:
-            return {}, {}, {}, {}
+            return {}, {}, {}
 
         new_count = sum(1 for _, wt in tasks if wt is not None)
         cached_count = len(tasks) - new_count
@@ -1052,16 +1189,12 @@ class RiskAssessor:
                         None if wc is None else self.engine.evaluate_work_location(wc, sem, session)
                         for _, wc in locations
                     ]
-                    lt_coros = [
-                        None if wt is None else self.engine.evaluate_location_type(wt, sem, session)
-                        for _, wt in location_types
-                    ]
                     classify_coros = [
                         self.engine.is_chinese_name(item, sem, session) for item in classify_items
                     ]
 
-                    # 只并发执行非 None 的协程，分批执行避免一次性调度过多协程导致 event loop 阻塞
-                    all_coros = [c for c in (task_coros + loc_coros + lt_coros + classify_coros) if c is not None]
+                    # 只并发执行非 None 的协程
+                    all_coros = [c for c in (task_coros + loc_coros + classify_coros) if c is not None]
                     if all_coros:
                         results = []
                         batch_size = 200
@@ -1086,12 +1219,6 @@ class RiskAssessor:
                     loc_results[key] = results[result_idx]
                     result_idx += 1
 
-            lt_results = {}
-            for i, (key, wt) in enumerate(location_types):
-                if wt is not None:
-                    lt_results[key] = results[result_idx]
-                    result_idx += 1
-
             # 人员分类结果
             classify_results = {}
             for item in classify_items:
@@ -1099,13 +1226,13 @@ class RiskAssessor:
                 result_idx += 1
 
             print(f"大模型并发评估完成")
-            return task_results, loc_results, lt_results, classify_results
+            return task_results, loc_results, classify_results
         finally:
             loop.close()
 
     # ==================== 缓存合并方法 ====================
 
-    def _merge_cached_llm_results(self, llm_results: Dict, loc_results: Dict, lt_results: Dict,
+    def _merge_cached_llm_results(self, llm_results: Dict, loc_results: Dict,
                                    cached_llm: Dict, work_tickets: List[Dict]):
         """将缓存的大模型结果合并到当前结果字典中"""
         merged_count = 0
@@ -1124,8 +1251,6 @@ class RiskAssessor:
                     empty_count += 1
             if ticket_key not in loc_results:
                 loc_results[ticket_key] = cached.get('llm_location', {})
-            if ticket_key not in lt_results:
-                lt_results[ticket_key] = cached.get('llm_location_type', {})
             merged_count += 1
 
         if empty_count > 0:
@@ -1134,7 +1259,7 @@ class RiskAssessor:
         print(f"已合并 {merged_count} 条缓存的大模型结果")
 
     def _extract_new_llm_results(self, new_tickets: List[Dict],
-                                  llm_results: Dict, loc_results: Dict, lt_results: Dict,
+                                  llm_results: Dict, loc_results: Dict,
                                   work_tickets: List[Dict]) -> Dict[str, Dict]:
         """从评估结果中提取新增票的大模型结果，用于保存到缓存"""
         new_llm = {}
@@ -1154,11 +1279,9 @@ class RiskAssessor:
 
             llm_result = llm_results.get(ticket_key)
             loc_result = loc_results.get(ticket_key, {})
-            lt_result = lt_results.get(ticket_key, {})
             new_llm[wc] = {
                 'llm_result': llm_result if llm_result is not None else {},
                 'llm_location': loc_result,
-                'llm_location_type': lt_result,
             }
             if llm_result is None:
                 logging.debug(f"[缓存保存] work_code={wc}, 大模型未评估（可能 work_task 为空或评估失败），仍标记为已处理")
@@ -1281,8 +1404,9 @@ class RiskAssessor:
         work_content = ticket.get('work_content', '')
         task_type = ticket.get('task_type')
 
-        # 安全意识
-        safety_score = 0
+        # 安全意识（取最高分，与主评估路径 _calc_principal_guardian_awareness / _calc_member_awareness 一致）
+        # B1: 负责人 + 监护人（取最高分）
+        principal_guardian_score = 0
         for uid_field in ['work_principal_uid', 'guardian_uid']:
             uid = ticket.get(uid_field)
             if uid:
@@ -1290,8 +1414,12 @@ class RiskAssessor:
                 if not parts:
                     parts = [uid]
                 for part in parts:
-                    safety_score += self.engine.calc_person_awareness(peccancy_dict, part)
+                    score = self.engine.calc_person_awareness(peccancy_dict, part)
+                    if score > principal_guardian_score:
+                        principal_guardian_score = score
 
+        # B2: 主要工作班成员（取最高分）
+        member_score = 0
         member_uid = ticket.get('work_member_uid')
         if member_uid:
             for mid in member_uid.split(','):
@@ -1302,7 +1430,11 @@ class RiskAssessor:
                 if not parts:
                     parts = [mid]
                 for part in parts:
-                    safety_score += self.engine.calc_person_awareness(peccancy_dict, part)
+                    score = self.engine.calc_person_awareness(peccancy_dict, part)
+                    if score > member_score:
+                        member_score = score
+
+        safety_score = principal_guardian_score + member_score
 
         # 作业总人数
         work_count_score = self.engine.calc_work_count(ticket.get('work_member_count'))

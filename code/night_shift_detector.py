@@ -21,9 +21,10 @@ import os
 import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
+import json
 import logging
-from datetime import datetime
-from typing import List, Dict, Optional
+from datetime import datetime, date, timedelta
+from typing import List, Dict, Optional, Set, Tuple
 
 from openpyxl import Workbook
 from openpyxl.styles import Border, Side, Alignment, PatternFill, Font
@@ -134,6 +135,9 @@ class NightShiftDetector:
     # 线路工作票类型（ticket_type 值）
     LINE_TICKET_TYPES = {'21', '22'}
 
+    # 工作内容排除关键词：包含这些关键词的工作票不算夜间作业
+    EXCLUDE_WORK_TASK_KEYWORDS = ['机巡', '智能巡检', '智能巡视']
+
     TICKET_TYPE_NAMES = {
         '11': '厂站第一种工作票',
         '12': '厂站第二种工作票',
@@ -153,6 +157,26 @@ class NightShiftDetector:
         :param data_fetcher: DataFetcher 实例，提供数据库查询能力
         """
         self.data_fetcher = data_fetcher
+
+    @staticmethod
+    def is_excluded_by_work_task(work_task: str) -> bool:
+        """检查工作内容是否包含排除关键词
+
+        如果工作内容包含【机巡】、【智能巡检】、【智能巡视】等关键词，
+        则不算夜间作业。
+
+        :param work_task: 工作内容/工作任务
+        :return: True 表示应排除（不算夜间作业），False 表示正常判定
+        """
+        if not work_task:
+            return False
+        for keyword in NightShiftDetector.EXCLUDE_WORK_TASK_KEYWORDS:
+            if keyword in work_task:
+                logger.info(
+                    f"工作内容包含排除关键词'{keyword}'，不判定为夜间作业（工作内容: {work_task[:60]}）"
+                )
+                return True
+        return False
 
     # ==================== 配置读取 ====================
 
@@ -210,6 +234,176 @@ class NightShiftDetector:
     def get_output_prefix() -> str:
         """获取输出文件名前缀"""
         return config_loader.get_night_shift_config().get('output_prefix', '夜间作业检测')
+
+    @staticmethod
+    def is_output_excel_enabled() -> bool:
+        """是否在定时检测时导出Excel并推送（MinIO/elink）
+
+        默认 true（向后兼容），设置为 false 时定时任务仅保存 JSON。
+        """
+        return config_loader.get_night_shift_config().get('output_excel', True)
+
+    @staticmethod
+    def get_json_output_dir() -> str:
+        """获取夜间作业 work_codes JSON 文件的保存目录（risk_calculation_formulav3.2/cache/）"""
+        base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        return os.path.join(base_dir, 'cache')
+
+    @staticmethod
+    def save_night_shift_work_codes(results: List[Dict], detection_hour: int):
+        """将夜间作业每条 work_code 的详细检测信息保存到 JSON 文件
+
+        文件名格式：
+          - 20点检测（线路票）: line_YYYYMMDD_HHMMSS.json
+          - 0点检测（厂站票）: station_YYYYMMDD_HHMMSS.json
+
+        :param results: 夜间作业检测结果列表，每条包含 work_code、ticket_type、work_state、last_gap_time 等
+        :param detection_hour: 检测的小时（20=线路, 0=厂站）
+        """
+        output_dir = NightShiftDetector.get_json_output_dir()
+        os.makedirs(output_dir, exist_ok=True)
+
+        # 根据检测小时确定类型前缀
+        if detection_hour == 20:
+            prefix = 'line'
+        else:
+            prefix = 'station'  # 0点（24点）检测的是厂站票
+
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        filename = f'{prefix}_{timestamp}.json'
+        filepath = os.path.join(output_dir, filename)
+
+        work_codes = sorted([r['work_code'] for r in results if r.get('work_code')])
+
+        # 构建每条 work_code 的详细检测信息
+        def _fmt_dt(val):
+            """格式化 datetime 对象为字符串，None 返回 None"""
+            if val is None:
+                return None
+            if isinstance(val, str):
+                return val
+            return val.strftime('%Y-%m-%d %H:%M:%S')
+
+        details = {}
+        for r in results:
+            wc = r.get('work_code', '')
+            if not wc:
+                continue
+            details[wc] = {
+                'ticket_type': r.get('ticket_type', ''),
+                'ticket_no': r.get('ticket_no', ''),
+                'work_task': r.get('work_task', ''),
+                'work_state': r.get('work_state', ''),
+                'last_gap_time': _fmt_dt(r.get('last_gap_time')),
+                'last_gap_start_time': _fmt_dt(r.get('last_gap_start_time')),
+                'reason': r.get('reason', ''),
+            }
+
+        detected_at = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        # 为每条详情记录注入检测时间
+        for wc in details:
+            details[wc]['detected_at'] = detected_at
+
+        data = {
+            'type': prefix,
+            'detected_at': detected_at,
+            'work_codes': work_codes,
+            'details': details,
+        }
+        with open(filepath, 'w', encoding='utf-8') as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+
+        logger.info(f"夜间作业检测详情已保存: {filepath}（{prefix}，共 {len(work_codes)} 条）")
+
+    @staticmethod
+    def load_yesterday_night_shift_work_codes() -> Tuple[Set[str], str, Dict]:
+        """加载前一天所有夜间作业检测的 work_code 集合、检测时间描述和详细检测信息
+
+        扫描 cache/ 目录下所有 line_ 和 station_ 前缀的 JSON 文件，
+        取日期为前一天的，合并所有 work_code 和 details。
+
+        :return: (work_codes集合, 检测时间描述, 详细检测信息字典)
+            检测时间描述如 "线路检测: 2026-07-08 20:05:00, 厂站检测: 2026-07-09 00:02:00"
+            详细检测信息字典 {work_code: {ticket_type, ticket_no, work_state, last_gap_time, last_gap_start_time, ...}}
+        """
+        output_dir = NightShiftDetector.get_json_output_dir()
+        if not os.path.isdir(output_dir):
+            return set(), '', {}
+
+        import re
+        yesterday = (date.today() - timedelta(days=1)).strftime('%Y%m%d')
+        pattern = re.compile(r'^(line|station)_(\d{8})_\d{6}\.json$')
+
+        work_codes = set()
+        detection_times = {}  # {'line': '2026-07-08 20:05:00', 'station': '2026-07-09 00:02:00'}
+        all_details = {}
+        for filename in os.listdir(output_dir):
+            match = pattern.match(filename)
+            if not match:
+                continue
+            file_date_str = match.group(2)
+            if file_date_str != yesterday:
+                continue
+            filepath = os.path.join(output_dir, filename)
+            ns_type = match.group(1)  # 'line' or 'station'
+            try:
+                with open(filepath, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+                codes = data.get('work_codes', [])
+                work_codes.update(codes)
+                detected_at = data.get('detected_at', '')
+                if detected_at:
+                    detection_times[ns_type] = detected_at
+                # 加载详细检测信息
+                details = data.get('details', {})
+                if details:
+                    all_details.update(details)
+                logger.info(f"读取夜间作业检测结果: {filename}（{len(codes)} 条）")
+            except Exception as e:
+                logger.warning(f"读取夜间作业检测结果文件失败: {filename}，错误: {e}")
+
+        # 构建检测时间描述
+        desc_parts = []
+        type_names = {'line': '线路检测', 'station': '厂站检测'}
+        for ns_type in ['line', 'station']:
+            if ns_type in detection_times:
+                desc_parts.append(f"{type_names[ns_type]}: {detection_times[ns_type]}")
+        detection_desc = ', '.join(desc_parts) if desc_parts else ''
+
+        return work_codes, detection_desc, all_details
+
+    @staticmethod
+    def clean_old_json_files(keep_days: int = 7):
+        """清理超过 keep_days 天的夜间作业 JSON 文件
+
+        文件名格式: line_YYYYMMDD_*.json 或 station_YYYYMMDD_*.json
+        :param keep_days: 保留天数，默认7天
+        """
+        output_dir = NightShiftDetector.get_json_output_dir()
+        if not os.path.isdir(output_dir):
+            return
+
+        import re
+        cutoff = date.today() - timedelta(days=keep_days)
+        pattern = re.compile(r'^(line|station)_(\d{8})_\d{6}\.json$')
+
+        count = 0
+        for filename in os.listdir(output_dir):
+            match = pattern.match(filename)
+            if not match:
+                continue
+            try:
+                file_date = datetime.strptime(match.group(2), '%Y%m%d').date()
+                if file_date < cutoff:
+                    filepath = os.path.join(output_dir, filename)
+                    os.remove(filepath)
+                    count += 1
+                    logger.debug(f"已删除过期夜间作业JSON文件: {filename}")
+            except (ValueError, OSError) as e:
+                logger.warning(f"清理夜间作业JSON文件失败: {filename}，错误: {e}")
+
+        if count > 0:
+            logger.info(f"夜间作业JSON文件清理完成: 共删除 {count} 个过期文件（保留 {keep_days} 天）")
 
     # ==================== 数据查询 ====================
 
@@ -301,6 +495,11 @@ class NightShiftDetector:
             if work_state != '6':
                 continue
 
+            # 排除：工作内容包含【机巡】、【智能巡检】、【智能巡视】等关键词
+            work_task = ticket.get('work_task', '') or ''
+            if self.is_excluded_by_work_task(work_task):
+                continue
+
             last_gap_time = ticket.get('last_gap_time')
             last_gap_start_time = ticket.get('last_gap_start_time')
 
@@ -349,12 +548,19 @@ class NightShiftDetector:
             work_state = str(ticket.get('work_state', ''))
 
             # 条件：工作状态为执行中
-            if work_state == '6':
-                night_shift_list.append({
-                    **ticket,
-                    'night_shift': True,
-                    'reason': '线路工作票：工作状态为执行中，20点检测判定为夜间作业',
-                })
+            if work_state != '6':
+                continue
+
+            # 排除：工作内容包含【机巡】、【智能巡检】、【智能巡视】等关键词
+            work_task = ticket.get('work_task', '') or ''
+            if self.is_excluded_by_work_task(work_task):
+                continue
+
+            night_shift_list.append({
+                **ticket,
+                'night_shift': True,
+                'reason': '线路工作票：工作状态为执行中，20点检测判定为夜间作业',
+            })
 
         if night_shift_list:
             logger.info(
@@ -384,6 +590,11 @@ class NightShiftDetector:
             if ticket_type_filter == 'station' and ticket_type not in self.STATION_TICKET_TYPES:
                 continue
             if ticket_type_filter == 'line' and ticket_type not in self.LINE_TICKET_TYPES:
+                continue
+
+            # 排除：工作内容包含【机巡】、【智能巡检】、【智能巡视】等关键词
+            work_task = ticket.get('work_task', '') or ''
+            if self.is_excluded_by_work_task(work_task):
                 continue
 
             is_night = False
@@ -539,6 +750,9 @@ def run_night_shift_detection():
     fetcher.connect()
 
     try:
+        # 清理过期的夜间作业 JSON 文件（执行检测前清理，保留7天）
+        NightShiftDetector.clean_old_json_files(keep_days=7)
+
         # 获取查询参数
         from main import get_query_params
         _, query_start_date, query_end_date = get_query_params()
@@ -560,14 +774,28 @@ def run_night_shift_detection():
             return
 
         logger.info(f"检测到 {len(results)} 张夜间作业工作票：")
+        work_codes = set()
         for i, r in enumerate(results, 1):
             ticket_type = str(r.get('ticket_type', ''))
             type_name = detector.TICKET_TYPE_NAMES.get(ticket_type, '未知')
+            wc = r.get('work_code', '')
+            if wc:
+                work_codes.add(wc)
             logger.info(f"  [{i}] {type_name}")
             logger.info(f"      票号: {r.get('ticket_no', '')}")
-            logger.info(f"      作业计划编号: {r.get('work_code', '')}")
+            logger.info(f"      作业计划编号: {wc}")
             logger.info(f"      工作任务: {r.get('work_task', '')}")
             logger.info(f"      判定依据: {r.get('reason', '')}")
+
+        # 保存检测结果详情到 JSON 文件（供第二天9点的主流程读取）
+        current_hour = current_time.hour
+        if results:
+            NightShiftDetector.save_night_shift_work_codes(results, current_hour)
+
+        # 根据配置决定是否导出Excel并推送（MinIO/elink）
+        if not NightShiftDetector.is_output_excel_enabled():
+            logger.info("output_excel 已关闭，跳过Excel导出及后续推送")
+            return
 
         # 导出 Excel
         filepath = detector.export_to_excel(results)
@@ -633,6 +861,7 @@ if __name__ == "__main__":
 
     try:
         detector = NightShiftDetector(fetcher)
+        current_time = datetime.now()
 
         if args.force:
             logger.info(f"=== 夜间作业检测（强制模式，filter={args.force}）===")
@@ -641,6 +870,13 @@ if __name__ == "__main__":
                 query_start_date=args.start_date,
                 query_end_date=args.end_date,
             )
+            # 强制模式下根据 filter 确定保存类型（all 时按当前小时判断）
+            if args.force == 'station':
+                save_hour = 0
+            elif args.force == 'line':
+                save_hour = 20
+            else:
+                save_hour = current_time.hour
         elif args.hour is not None:
             now = datetime.now()
             sim_time = now.replace(hour=args.hour, minute=0, second=0, microsecond=0)
@@ -650,25 +886,35 @@ if __name__ == "__main__":
                 query_start_date=args.start_date,
                 query_end_date=args.end_date,
             )
+            save_hour = args.hour
         else:
             logger.info(f"=== 夜间作业检测（自动模式，当前时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}）===")
             results = detector.detect(
                 query_start_date=args.start_date,
                 query_end_date=args.end_date,
             )
+            save_hour = current_time.hour
 
         if not results:
             logger.info("未检测到夜间作业。")
         else:
             logger.info(f"检测到 {len(results)} 张夜间作业工作票：")
+            work_codes = set()
             for i, r in enumerate(results, 1):
                 ticket_type = str(r.get('ticket_type', ''))
                 type_name = detector.TICKET_TYPE_NAMES.get(ticket_type, '未知')
+                wc = r.get('work_code', '')
+                if wc:
+                    work_codes.add(wc)
                 logger.info(f"  [{i}] {type_name}")
                 logger.info(f"      票号: {r.get('ticket_no', '')}")
-                logger.info(f"      作业计划编号: {r.get('work_code', '')}")
+                logger.info(f"      作业计划编号: {wc}")
                 logger.info(f"      工作任务: {r.get('work_task', '')}")
                 logger.info(f"      判定依据: {r.get('reason', '')}")
+
+            # 保存检测结果详情到 JSON 文件（供第二天主流程读取）
+            if results:
+                NightShiftDetector.save_night_shift_work_codes(results, save_hour)
 
             # 导出 Excel
             filepath = detector.export_to_excel(results)

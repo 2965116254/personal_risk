@@ -78,15 +78,20 @@ class ExcelExporter:
         filepath = os.path.join(self.output_dir, filename)
 
         # 预处理：在内存中过滤无违章数据，避免逐行 delete_rows（大数据量时极慢）
+        # 夜间作业的票强制输出（即使模型==人工）
         filtered_results = []
+        night_shift_count = 0
         for result in results:
             detailed = result.get('详细评估结果', [])
             has_red = any(
                 d.get('风险值得分', 0) > d.get('客户填入分值', 0)
                 for d in detailed
             )
-            if has_red:
+            is_ns = result.get('is_night_shift', False)
+            if has_red or is_ns:
                 filtered_results.append(result)
+                if is_ns:
+                    night_shift_count += 1
 
         wb = Workbook()
         ws = wb.active
@@ -110,7 +115,8 @@ class ExcelExporter:
         wb.save(filepath)
 
         print(f'数据已保存到: {filepath}')
-        print(f'共保存了 {len(filtered_results)} 条工作计划编号的评估结果（已过滤无违章数据）')
+        ns_msg = f'，其中夜间作业 {night_shift_count} 条' if night_shift_count else ''
+        print(f'共保存了 {len(filtered_results)} 条工作计划编号的评估结果（已过滤无违章数据{ns_msg}）')
         return filepath
 
     def _write_row(self, ws, row_num: int, result: Dict):
@@ -185,12 +191,14 @@ class ExcelExporter:
         tp_customer = _dc('作业时段')
 
         customer_c = int(loc_customer) + int(typ_customer) + int(wea_customer) + int(tp_customer)
+        is_ns = result.get('is_night_shift', False)
+        tp_note = '夜间作业' if is_ns else ''
         c_segments = [
             (f"总分: 【模型评估】{c_score}分、【人工评估】{customer_c}分\n", c_score > customer_c),
             (f"作业地段: 【模型评估】{loc_model}分、【人工评估】{int(loc_customer)}分\n", int(loc_model) > int(loc_customer)),
             (f"作业类型: 【模型评估】{typ_model}分、【人工评估】{int(typ_customer)}分\n", int(typ_model) > int(typ_customer)),
             (f"天气: 【模型评估】{wea_model}分、【人工评估】{int(wea_customer)}分\n", int(wea_model) > int(wea_customer)),
-            (f"作业时段: 【模型评估】{tp_model}分、【人工评估】{int(tp_customer)}分", int(tp_model) > int(tp_customer)),
+            (f"作业时段: 【模型评估】{tp_model}分、【人工评估】{int(tp_customer)}分{tp_note}", int(tp_model) > int(tp_customer) or is_ns),
         ]
         ws.cell(row=row_num, column=6, value=self._make_rich_text_opt(c_segments))
 
@@ -219,7 +227,9 @@ class ExcelExporter:
         ws.cell(row=row_num, column=9, value=f"【模型评估】{model_level} 【人工评估】{customer_level}")
 
         # 10. 问题描述
-        ws.cell(row=row_num, column=10, value=self._generate_judgment(detailed))
+        ns_judgment = result.get('night_shift_judgment', '')
+        judgment = self._generate_judgment(detailed, night_shift_judgment=ns_judgment or None)
+        ws.cell(row=row_num, column=10, value=judgment)
 
         # 11. 违章代码
         ws.cell(row=row_num, column=11, value='D10')
@@ -227,10 +237,14 @@ class ExcelExporter:
         # 12. 违章条款
         ws.cell(row=row_num, column=12, value='信息系统的作业信息填报不正确、不规范')
 
-    def _generate_judgment(self, detailed: List[Dict]):
+    def _generate_judgment(self, detailed: List[Dict], night_shift_judgment: Optional[str] = None):
         """生成规则判断结果，返回 CellRichText（模型评估>人工评估的片段标红）"""
         differences = [d for d in detailed if d.get('风险值得分', 0) != d.get('客户填入分值', 0)]
         if not differences:
+            if night_shift_judgment:
+                # 夜间作业无差异时，单独输出判定文本（标红）
+                red_font = InlineFont(rFont='微软雅黑', sz=10, color='FF0000')
+                return CellRichText(TextBlock(red_font, night_shift_judgment))
             return '模型评估结果与客户填写结果一致'  # 不需标红时用纯文本，避免 RichText 开销
 
         segments = []
@@ -296,7 +310,10 @@ class ExcelExporter:
                     explanation = nature_explanation.get(evaluation_result, f'对应规则得{rule_score}分')
                     segments.append((f'规则判断依据：作业主体的人员性质为"{evaluation_result}"，根据人员性质评分规则——{explanation}\n', False))
                 elif factor == '作业时段':
-                    segments.append((f'规则判断依据：作业时段被判定为"{evaluation_result}"，根据作业时段评分规则得{rule_score}分\n', False))
+                    if night_shift_judgment:
+                        segments.append((f'规则判断依据：作业时段被判定为"{night_shift_judgment}"\n', False))
+                    else:
+                        segments.append((f'规则判断依据：作业时段被判定为"{evaluation_result}"，根据作业时段评分规则得{rule_score}分\n', False))
                 elif evaluation_result:
                     segments.append((f"规则判断依据：{evaluation_result}\n", False))
                 else:

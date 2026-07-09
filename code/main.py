@@ -19,6 +19,7 @@ import config_loader
 from elink_client import ElinkClient
 from risk_assessor import RiskAssessor
 from excel_exporter import ExcelExporter
+from night_shift_detector import NightShiftDetector
 
 # ==================== 日志配置 ====================
 
@@ -98,9 +99,20 @@ def upload_to_minio(local_file_path, object_name=None):
 
 # ==================== 违规待处理记录 API ====================
 
+def _simplify_factor(factor: str) -> str:
+    """简化评估因子名称"""
+    if '现场作业负责人' in factor:
+        return '现场作业负责人及监护人安全意识'
+    if '主要工作班成员' in factor:
+        return '主要工作班成员安全意识'
+    if '负责人的人员性质' in factor:
+        return '人员性质'
+    return factor
+
+
 def _build_violation_description(detailed_results):
-    """从详细评估结果构建违规描述文本"""
-    differences = [d for d in detailed_results if d.get('风险值得分', 0) != d.get('客户填入分值', 0)]
+    """从详细评估结果构建违规描述文本（仅包含模型评估>人工评估的数据，附带规则判断依据）"""
+    differences = [d for d in detailed_results if d.get('风险值得分', 0) > d.get('客户填入分值', 0)]
     if not differences:
         return '模型评估结果与客户填写结果一致'
 
@@ -109,8 +121,78 @@ def _build_violation_description(detailed_results):
         factor = diff.get('评估因子', '')
         rule_score = diff.get('风险值得分', 0)
         customer_score = diff.get('客户填入分值', 0)
-        parts.append(f"{factor}: 模型评估{rule_score}分，人工评估{customer_score}分")
-    return '；'.join(parts)
+        evaluation_result = diff.get('评估结果', '')
+        llm_rule = diff.get('大模型命中规则', '')
+        llm_keywords = diff.get('大模型命中关键词', '')
+        llm_inferred = diff.get('大模型推断依据', '')
+
+        simplified = _simplify_factor(factor)
+
+        # 分数行
+        parts.append(f"{simplified}: 模型评估{rule_score}分，人工评估{customer_score}分")
+
+        # 规则判断依据
+        if factor in ('作业地段', '作业类型'):
+            reason = f"规则判断依据：模型判断{simplified}为{rule_score}分"
+            if llm_rule:
+                reason += f"，{llm_rule}"
+            if llm_keywords:
+                reason += f"，工作内容中命中关键词：{llm_keywords}"
+            if llm_inferred:
+                reason += f"（{llm_inferred}）"
+            parts.append(reason)
+        elif factor in (
+            '现场作业负责人（含小组工作负责人）及监护人（含专职监护人）安全意识',
+            '主要工作班成员(辅助工除外)安全意识',
+        ):
+            if evaluation_result and evaluation_result != '无人员':
+                parts.append(f"规则判断依据：{evaluation_result}")
+                parts.append(
+                    "评分说明：根据安全意识评分规则——有A类违章得6分、有B类违章得5分、"
+                    "有C类违章得3分、有D类违章3次及以上得2分、D类违章不足3次或无违章得0分，取最高分作为该项得分"
+                )
+            else:
+                parts.append(f"规则判断依据：无相关作业人员信息，根据规则默认得{rule_score}分")
+        elif factor == '作业总人数':
+            count_str = evaluation_result if evaluation_result and evaluation_result != '未知' else '0'
+            result_line = f"规则判断依据：作业总人数为{count_str}人"
+            try:
+                count = int(count_str)
+                thresholds = [
+                    (50, 15, '≥50人'),
+                    (24, 8, '24-49人'),
+                    (16, 5, '16-23人'),
+                    (8, 3, '8-15人'),
+                    (5, 1, '5-7人'),
+                ]
+                rule_desc = '，根据人数评分规则：'
+                for threshold, score, desc in thresholds:
+                    if count >= threshold:
+                        rule_desc += f'{desc}得{score}分'
+                        break
+                else:
+                    rule_desc += '不足5人得0分'
+                result_line += rule_desc
+            except (ValueError, TypeError):
+                result_line += '，无法根据人数确定分值，默认得0分'
+            parts.append(result_line)
+        elif factor == '负责人的人员性质':
+            nature_explanation = {
+                '本单位-系统内人员': '得0分',
+                '总包单位作业': '得3分',
+                '分包作业': '得5分',
+                '未知人员性质': '默认得0分',
+            }
+            explanation = nature_explanation.get(evaluation_result, f'对应规则得{rule_score}分')
+            parts.append(f'规则判断依据：作业主体的人员性质为"{evaluation_result}"，根据人员性质评分规则——{explanation}')
+        elif factor == '作业时段':
+            parts.append(f'规则判断依据：作业时段被判定为"{evaluation_result}"，根据作业时段评分规则得{rule_score}分')
+        elif evaluation_result:
+            parts.append(f"规则判断依据：{evaluation_result}")
+        else:
+            parts.append(f"规则判断依据：根据{simplified}评估规则，计算得分为{rule_score}分")
+
+    return '\n'.join(parts)
 
 
 def send_violation_records(results):
@@ -137,20 +219,28 @@ def send_violation_records(results):
 
         detailed = result.get('详细评估结果', [])
 
-        # 只发送模型分值 > 人工分值的记录（无差异或模型分值更低的不发送）
+        # 判断模型评估与人工评估的关系
         has_model_gt_manual = any(
             d.get('风险值得分', 0) > d.get('客户填入分值', 0)
             for d in detailed
         )
-        if not has_model_gt_manual:
-            continue
+        has_model_lt_manual = any(
+            d.get('风险值得分', 0) < d.get('客户填入分值', 0)
+            for d in detailed
+        )
 
-        description = _build_violation_description(detailed)
+        if has_model_gt_manual:
+            # 有模型>人工的记录 → D10，附带详细差异说明
+            violation_code = "D10"
+            description = _build_violation_description(detailed)
+        else:
+            # 模型<=人工 → 跳过不发送
+            continue
 
         payload.append({
             "deptCode": dept_code,
             "workSite": None,
-            "violationCode": "D10",
+            "violationCode": violation_code,
             "description": description,
             "wticketNo": result.get('工作票票号', ''),
             "workPlanNo": result.get('作业计划编号', ''),
@@ -238,6 +328,9 @@ def run_risk_calculation():
         config = config_loader.get_config()
         db_config = config_loader.get_db_new_config()
 
+        # 清理过期的夜间作业 JSON 文件（保留7天）
+        NightShiftDetector.clean_old_json_files(keep_days=7)
+
         # 查询参数
         limit, query_start_date, query_end_date = get_query_params()
 
@@ -251,10 +344,21 @@ def run_risk_calculation():
             if work_codes:
                 print(f"特定计划编号测试模式: {work_codes}")
 
+        # 加载前一天的夜间作业详情（work_codes + 检测时间 + 详细检测信息）
+        night_shift_work_codes, night_shift_detection_desc, night_shift_details = \
+            NightShiftDetector.load_yesterday_night_shift_work_codes()
+        if night_shift_work_codes:
+            print(f"加载前一天夜间作业检测结果: {len(night_shift_work_codes)} 条")
+            if night_shift_detection_desc:
+                print(f"  检测时间: {night_shift_detection_desc}")
+
         # 执行风险评估
         assessor = RiskAssessor(db_config)
         results = assessor.assess(limit=limit, query_start_date=query_start_date, query_end_date=query_end_date,
-                                  incremental_output=True, work_codes=work_codes)
+                                  incremental_output=True, work_codes=work_codes,
+                                  night_shift_work_codes=night_shift_work_codes,
+                                  night_shift_detection_desc=night_shift_detection_desc,
+                                  night_shift_details=night_shift_details)
 
         if not results:
             print("没有增量数据，输出空Excel")
